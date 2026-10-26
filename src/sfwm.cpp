@@ -20,6 +20,7 @@
 #include "input/inject.hpp"
 #include "input/pointer.hpp"
 #include "input/touch.hpp"
+#include "protocol/data_device.hpp"
 #include "protocol/misc_ext.hpp"
 #include "protocol/syncobj.hpp"
 #include "protocol/presentation.hpp"
