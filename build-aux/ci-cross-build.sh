@@ -50,13 +50,33 @@ echo "deps    : $DEPS"
 # ---- 预检：把“环境不对”和“代码编不过”分开 -----------------------------
 $CLANG --version | head -1
 for f in "$SYSROOT/usr/include/android/native_window.h" \
-         "$SYSROOT/usr/lib/aarch64-linux-android/libandroid.so" \
          "$DEPS/include/wayland-server-core.h" \
          "$DEPS/include/xkbcommon/xkbcommon.h" \
          "$DEPS/include/xf86drm.h" \
          "$DEPS/lib/libwayland-server.so"; do
     [ -e "$f" ] || { echo "❌ 预检失败，缺：$f" >&2; exit 1; }
 done
+
+# libandroid.so / liblog.so 不一定在 sysroot/usr/lib/<triple>/ 根下 ——
+# 官方 NDK 放在 API 级别子目录（.../aarch64-linux-android/24/），自定义 NDK 可能
+# 干脆不提供 stub。所以别硬编码路径，改成“找到就用，找不到就降级链接”。
+SYSLIB=$(first_glob "$SYSROOT/usr/lib/aarch64-linux-android/$API" \
+                    "$SYSROOT/usr/lib/aarch64-linux-android" || true)
+ANDROID_SO=$(find "$SYSROOT/usr/lib" -name 'libandroid.so' 2>/dev/null | head -1 || true)
+LENIENT=""
+ANDROID_LIBS="-landroid -llog"
+if [ -n "$ANDROID_SO" ]; then
+    echo "libandroid.so : $ANDROID_SO"
+    SYSLIB=$(dirname "$ANDROID_SO")
+else
+    echo "libandroid.so : 没找到 —— 这个 NDK 不带 bionic stub 库"
+    echo "                降级为「只验证能编过、允许未解析符号」的链接（不产出可运行二进制）"
+    LENIENT="-Wl,--unresolved-symbols=ignore-all"
+    ANDROID_LIBS=""
+fi
+if [ -n "${SYSLIB:-}" ] && [ -d "$SYSLIB" ]; then
+    echo "syslib dir    : $SYSLIB"
+fi
 echo "预检通过"
 
 # ---- 生成协议 -----------------------------------------------------------
@@ -94,10 +114,16 @@ for c in "$OUT/inc"/*-protocol.c; do
 done
 
 echo "---- 编译链接 sfwm（C++） ----"
+LFLAGS="-L$DEPS/lib"
+if [ -n "${SYSLIB:-}" ] && [ -d "${SYSLIB:-}" ]; then
+    LFLAGS="-L$SYSLIB $LFLAGS"
+fi
+# shellcheck disable=SC2086  # 这里就是要靠分词展开多个参数
 $CLANGXX $CXXFLAGS -o "$OUT/sfwm" \
     "$ROOT/src/sfwm.cpp" "$OUT"/obj/*.o \
-    -L"$DEPS/lib" \
-    -lwayland-server -lxkbcommon -ldrm -landroid -llog
+    $LFLAGS \
+    -lwayland-server -lxkbcommon -ldrm $ANDROID_LIBS \
+    $LENIENT
 
 echo "---- 结果 ----"
 ls -l "$OUT/sfwm"
