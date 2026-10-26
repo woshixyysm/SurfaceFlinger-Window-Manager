@@ -67,8 +67,13 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq libwayland-bin wayland-protocols xz-utils
 
-      - name: 取 Termux 的 wayland / libxkbcommon / libdrm
-        run: sh build-aux/ci-fetch-termux-deps.sh "$RUNNER_TEMP/deps"
+      - name: 解出 Termux 依赖（仓库内置，就是设备上在跑的那份）
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/deps"
+          tar -xJf deps/termux-deps-aarch64.tar.xz -C "$RUNNER_TEMP/deps"
+          ls -l "$RUNNER_TEMP/deps/include/wayland-server-core.h" \
+                "$RUNNER_TEMP/deps/lib/libwayland-server.so"
 
       - name: 交叉编译
         run: |

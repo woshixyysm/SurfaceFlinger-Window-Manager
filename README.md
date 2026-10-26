@@ -67,19 +67,24 @@ ninja -C build                               # 产物 build/sfwm
 | `#pragma once` | 每个模块头都要有 |
 | 无生成物入库 | `*-protocol.c`、`*-server-protocol.h`、`*.o`、`sfwm` 一律不许提交 |
 | 协议生成 | 用 `wayland-scanner` 把 28 个 XML 逐个生成一遍（装了 `libwayland-bin` + `wayland-protocols`） |
-| **交叉编译** | 用 [android-ndk-custom](https://github.com/HomuHomu833/android-ndk-custom) r30 + Termux 的 wayland/libxkbcommon/libdrm 头库，把 `sfwm` 真编成 aarch64-android 二进制 |
+| **交叉编译** | 用 [android-ndk-custom](https://github.com/HomuHomu833/android-ndk-custom) r30 + `deps/` 里那份 Termux 头库，把 `sfwm` 真编成 aarch64-android 二进制 |
 
 交叉编译为什么能成：代码对 Android 的依赖很少 —— 只有 `android/native_window.h`（NDK sysroot 里有），
 SurfaceFlinger 那套是**手写 dlsym ABI**，不需要链接 `libgui`。所以只差三个库的头和 `.so`，
-而设备跑的就是 Termux 的那份，直接拿同一份最贴近真实。
+而 `deps/termux-deps-aarch64.tar.xz`（432 KB）就是**设备上在跑的那一份**（wayland 1.25.0 /
+xkbcommon 1.13.2 / libdrm 2.4.134），ABI 天然一致，不依赖任何外部软件源。详见 `deps/README.md`。
 
-> 该 job 首轮带 `continue-on-error: true`：本机无法复现 runner 上的下载/解包路径，
+> **AOSP 不用拉。** NDK 本身就是 AOSP 的工具链产物，bionic 和 `native_window.h` 里都有；
+> 我们不 include 任何 `gui/`、`binder/` 头，也没链 `libgui`。拉整个 AOSP（几十 GB）
+> 对编译这个 5600 行合成器没有增量价值。
+
+> 该 job 首轮带 `continue-on-error: true`：本机无法复现 runner 上的 NDK 下载/解包路径，
 > 先让失败不卡仓库。第一次绿了就把那行删掉，它就变成真闸门。
 
-本地想跑这条交叉编译（需要 NDK 和一个 deps 前缀）：
+本地想跑这条交叉编译（需要 NDK）：
 
 ```sh
-sh build-aux/ci-fetch-termux-deps.sh /tmp/deps      # 取 wayland/xkbcommon/libdrm
+mkdir -p /tmp/deps && tar -xJf deps/termux-deps-aarch64.tar.xz -C /tmp/deps
 NDK=/path/to/ndk DEPS=/tmp/deps sh build-aux/ci-cross-build.sh
 # 产物 ci-build/sfwm
 ```
