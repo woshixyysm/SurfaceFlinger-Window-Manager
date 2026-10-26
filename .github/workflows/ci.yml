@@ -1,0 +1,46 @@
+name: ci
+
+# 这个项目真正的编译只能在 Termux / Android 上做（要 bionic、libandroid、SurfaceFlinger
+# 的 Binder ABI），GitHub 的 Linux runner 编不了。所以 CI 只做“不需要 Android 环境
+# 也能证明”的那部分：结构不变式 + 协议生成 + 拆分无损。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  structure:
+    name: 结构与协议生成
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 wayland-scanner 与 wayland-protocols
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libwayland-bin wayland-protocols
+          command -v wayland-scanner
+          ls /usr/share/wayland-protocols/stable | head -3
+
+      - name: 结构检查 + 逐个生成 28 个协议
+        run: python3 tools/check_structure.py --protogen --show-order
+
+  lossless:
+    name: 拆分无损（对拆分前单文件逐行比对）
+    # 只在手动触发时跑：模块一旦有意修改（修 bug / 加功能），这项就该“失败”，
+    # 它不是长期约束，只是一次可复现的证据。
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # 要 git show 389c0f6:src/sfwm.cpp
+
+      - name: 把 24 个模块拼回去，与 4958 行原件逐行比对
+        run: python3 tools/verify_split.py

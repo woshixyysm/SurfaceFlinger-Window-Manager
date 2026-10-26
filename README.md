@@ -52,6 +52,32 @@ ninja -C build                               # 产物 build/sfwm
 `--prefix` 必须给（默认 `/usr/local` 会让 `-idirafter` 全部落空）。
 协议清单（28 个 = 3 个私有 + 25 个系统 wayland-protocols）已全部写进 `meson.build`。
 
+## CI 能做什么、不能做什么
+
+这个项目的编译**只能在 Termux / Android 上做**（要 bionic、`libandroid`、`liblog`，
+以及 SurfaceFlinger 的 Binder ABI），Linux runner 编不了。所以 `.github/workflows/ci.yml`
+只跑不需要 Android 环境也能证明的东西：
+
+| 检查 | 内容 |
+|---|---|
+| include 解析 | 本地 include 必须存在；协议头可以是待生成的，但必须在 `meson.build` 清单里 |
+| 无孤儿 / 无环 | `src/` 下每个 `.hpp` 从 `sfwm.cpp` 都可达；模块之间不能 include 成环 |
+| `#pragma once` | 每个模块头都要有 |
+| 无生成物入库 | `*-protocol.c`、`*-server-protocol.h`、`*.o`、`sfwm` 一律不许提交 |
+| 协议生成 | 用 `wayland-scanner` 把 28 个 XML 逐个生成一遍（装了 `libwayland-bin` + `wayland-protocols`） |
+
+本地跑：
+
+```sh
+python3 tools/check_structure.py                      # 结构检查
+python3 tools/check_structure.py --protogen --show-order  # 加上协议生成，并打印展开顺序
+python3 tools/verify_split.py                         # 拆分无损证明（手动 workflow 里跑）
+```
+
+`tools/verify_split.py` 会拿 `389c0f6`（拆分前那次提交）的单文件跟当前模块拼回去的结果逐行比对。
+它只在手动触发（workflow_dispatch）时跑 —— 模块一旦有意修改（修 bug / 加功能），这项就该失败，
+它是一次可复现的证据，不是长期约束。
+
 ## 几个踩过的硬坑（别删注释里的说明）
 
 1. **`extern "C" {` 包住了协议头** → 任何被它包住的头文件里不能出现 C++ 特性
