@@ -21,6 +21,10 @@ add_project_arguments(
 
 libdir  = join_paths(prefix, 'lib')
 gccdir  = join_paths(prefix, 'opt/gcc-17/lib/gcc/aarch64-linux-android/17.0.0')
+
+# 模块之间写 #include "core/config.hpp" 这种相对 src/ 的路径 →
+# 单引号 include 会先找“包含者所在目录”，所以必须在 -I 里提供 src 根。
+inc = include_directories('src')
 ld_extra = [
   '-L' + libdir, '-L' + gccdir,
   '-lwayland-server', '-ldrm', '-lxkbcommon', '-landroid', '-llog',
@@ -70,8 +74,12 @@ foreach p : proto_entries
   proto_c += gens[1]
 endforeach
 
+# 单 TU：src/sfwm.cpp 只是一串 include（顺序 = 代码原本的顺序）+ main。
+# 所以不要把这堆模块编成多个 .cpp —— 它们目前共享 static 全局，
+# 拆到多个 TU 需要先把全局改成 extern（那是下一步的事）。
 executable('sfwm',
   'src/sfwm.cpp',
   proto_c,
+  include_directories: inc,
   link_args: ld_extra,
   install: false)

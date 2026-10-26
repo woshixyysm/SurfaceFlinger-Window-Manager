@@ -6,20 +6,39 @@
 > 起因：本机内核 `CONFIG_VT` 未开、GPU 只有 KGSL（无 DRM），所以拿不到 DRM master，
 > 传统合成器（wlroots/Hyprland）无法直接跑。SurfaceFlinger 是唯一能用的显示通路。
 
-## 现状
+## 结构
 
-`src/sfwm.cpp` 是一个 **5631 行的单文件**（MVP 产物，能跑但结构糟糕）。
-本仓库正在进行 **只搬不重写** 的拆分：
+拆分原则：**只搬不重写**。切点全是「顺序边界」，每个模块的 include 位置
+就是它原来在单文件里的位置，因此预处理后的 TU 与原来等价。
+能用 `tools/verify_split.py` 那种办法把模块拼回去逐行比对来证明无损（已逐行一致）。
 
-| 目标模块 | 现在在哪 |
-|---|---|
-| `backend/sf_layer`   SurfaceFlinger 图层事务（手写 dlsym + asm 桥） | `src/sf_layer.hpp` ✅ 已独立 |
-| `protocol/screencopy` zwlr_screencopy_manager_v1 | `src/sc_screencopy.hpp` ✅ 已独立 |
-| `render/blit`        像素搬运（dmabuf/shm、格式、alpha、看门狗） | `src/sfwm.cpp` ⏳ |
-| `input/gestures`     点击/长按/捏合/缩放 | `src/sfwm.cpp` ⏳ |
-| `compositor/*`       server / surface / output | `src/sfwm.cpp` ⏳ |
-| `shell/*`            xdg_shell / layer_shell / popup | `src/sfwm.cpp` ⏳ |
-| `protocol/*`         data_device / text_input / presentation … | `src/sfwm.cpp` ⏳ |
+```
+src/
+  sfwm.cpp                 入口：include 表（顺序 = 原文件顺序）+ main
+  view.hpp                 struct View（一个 wl_surface 的全部状态 + 几何/堆叠助手）
+  sf_layer.hpp             SurfaceFlinger 图层事务（手写 dlsym + asm 桥）
+  sc_screencopy.hpp        zwlr_screencopy_manager_v1
+  core/prelude.hpp         标准头 + 协议头 + wl_shm fd 帮手
+  core/config.hpp          配置全局 + 缓冲/连接/Server 结构体
+  core/trace.hpp           结构化跟踪（SFWM_TRACE）
+  render/cursor.hpp        光标几何绘制 + Xcursor 主题解析 + 上屏
+  render/testpat.hpp       自检图案（SFWM_TESTPAT）
+  compositor/surface.hpp   wl_region / wl_surface / wl_shm
+  protocol/linux_dmabuf.hpp, wl_drm.hpp, compositor.hpp, subcompositor.hpp,
+           output.hpp, misc_ext.hpp, misc_ext2.hpp, syncobj.hpp,
+           presentation.hpp, activation.hpp, xwayland.hpp
+  input/seat.hpp            wl_seat / pointer / touch 绑定
+  input/keyboard.hpp       wl_keyboard + text_input_v3 + IME + 控制命令
+  input/inject.hpp         按键注入 socket（sfwmc 走这里）
+  input/pointer.hpp        指针 / 鼠标按钮 / 命中测试 / 抬升
+  input/touch.hpp          触摸状态机 + 手势 + handle_frame + /dev/input
+  shell/layer_shell.hpp    zwlr_layer_shell_v1（面板/托盘）
+  shell/xdg_shell.hpp      xdg_wm_base / toplevel / popup / configure
+```
+
+> ⚠️ 这些模块目前仍是 **单 TU**（`sfwm.cpp` 只做 include），因为它们共享 `static` 全局。
+> 下一步拆成独立 `.cpp` 时，必须先把全局改成 `extern` 声明 + 一处定义，
+> 那是有真实风险的改动，和本轮“零行为差异”不是同一件事。
 
 ## 构建
 
