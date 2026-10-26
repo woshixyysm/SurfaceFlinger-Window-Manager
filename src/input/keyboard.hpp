@@ -352,6 +352,8 @@ static View *front_view() {
     return best;
 }
 
+static void dd_focus_changed(View *v);   // protocol/data_device.hpp（剪贴板跟焦点走）
+
 static void kb_set_focus(View *v) {
     if (v == g_srv.kb_focus) return;
     View *old_focus = g_srv.kb_focus;
@@ -377,6 +379,7 @@ static void kb_set_focus(View *v) {
     if (v) {
         for (wl_resource *k : g_srv.keyboards) kb_send_enter_to(k, v);
     }
+    dd_focus_changed(v);   // 新焦点客户端拿到剪贴板；老的收到 selection(NULL)
 }
 
 static void kb_key(uint32_t code, bool pressed) {

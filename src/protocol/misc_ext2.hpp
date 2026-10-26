@@ -303,72 +303,9 @@ static const struct zxdg_decoration_manager_v1_interface deco_mgr_impl = {
     .get_toplevel_decoration = deco_mgr_get,
 };
 
-// ---- wl_data_device_manager（剪贴板 / 拖放：先只做"能 bind"）
-static void dsrc_offer(wl_client *, wl_resource *, const char *) {}
-static void dsrc_destroy(wl_client *, wl_resource *r) { wl_resource_destroy(r); }
-static void dsrc_set_actions(wl_client *, wl_resource *, uint32_t) {}
-static const struct wl_data_source_interface dsrc_impl = {
-    .offer = dsrc_offer,
-    .destroy = dsrc_destroy,
-    .set_actions = dsrc_set_actions,
-};
-static void ddev_start_drag(wl_client *, wl_resource *, wl_resource *, wl_resource *,
-                            wl_resource *, uint32_t) {}
-static void ddev_set_selection(wl_client *, wl_resource *, wl_resource *, uint32_t) {}
-static void ddev_release(wl_client *, wl_resource *r) { wl_resource_destroy(r); }
-static const struct wl_data_device_interface ddev_impl = {
-    .start_drag = ddev_start_drag,
-    .set_selection = ddev_set_selection,
-    .release = ddev_release,
-};
-static void ddm_create_source(wl_client *c, wl_resource *res, uint32_t id) {
-    wl_resource *o = wl_resource_create(c, &wl_data_source_interface,
-                                        wl_resource_get_version(res), id);
-    if (!o) { wl_client_post_no_memory(c); return; }
-    wl_resource_set_implementation(o, &dsrc_impl, nullptr, nullptr);
-}
-static void ddm_get_device(wl_client *c, wl_resource *res, uint32_t id, wl_resource *) {
-    wl_resource *o = wl_resource_create(c, &wl_data_device_interface,
-                                        wl_resource_get_version(res), id);
-    if (!o) { wl_client_post_no_memory(c); return; }
-    wl_resource_set_implementation(o, &ddev_impl, nullptr, nullptr);
-}
-static const struct wl_data_device_manager_interface ddm_impl = {
-    .create_data_source = ddm_create_source,
-    .get_data_device = ddm_get_device,
-};
-
-// ---- zwp_primary_selection_device_manager_v1
-static void psel_src_offer(wl_client *, wl_resource *, const char *) {}
-static void psel_src_destroy(wl_client *, wl_resource *r) { wl_resource_destroy(r); }
-static const struct zwp_primary_selection_source_v1_interface psel_src_impl = {
-    .offer = psel_src_offer,
-    .destroy = psel_src_destroy,
-};
-static void psel_dev_set_selection(wl_client *, wl_resource *, wl_resource *, uint32_t) {}
-static void psel_dev_destroy(wl_client *, wl_resource *r) { wl_resource_destroy(r); }
-static const struct zwp_primary_selection_device_v1_interface psel_dev_impl = {
-    .set_selection = psel_dev_set_selection,
-    .destroy = psel_dev_destroy,
-};
-static void psel_mgr_create_source(wl_client *c, wl_resource *res, uint32_t id) {
-    wl_resource *o = wl_resource_create(c, &zwp_primary_selection_source_v1_interface,
-                                        wl_resource_get_version(res), id);
-    if (!o) { wl_client_post_no_memory(c); return; }
-    wl_resource_set_implementation(o, &psel_src_impl, nullptr, nullptr);
-}
-static void psel_mgr_get_device(wl_client *c, wl_resource *res, uint32_t id, wl_resource *) {
-    wl_resource *o = wl_resource_create(c, &zwp_primary_selection_device_v1_interface,
-                                        wl_resource_get_version(res), id);
-    if (!o) { wl_client_post_no_memory(c); return; }
-    wl_resource_set_implementation(o, &psel_dev_impl, nullptr, nullptr);
-}
-static void psel_mgr_destroy(wl_client *, wl_resource *r) { wl_resource_destroy(r); }
-static const struct zwp_primary_selection_device_manager_v1_interface psel_mgr_impl = {
-    .create_source = psel_mgr_create_source,
-    .get_device = psel_mgr_get_device,
-    .destroy = psel_mgr_destroy,
-};
+// wl_data_device_manager / zwp_primary_selection_device_manager_v1
+// 已经搬到 protocol/data_device.hpp（真实现，不再是空桩）。
+// 这里只留一行提醒：别把旧空桩加回来 —— 那会盖掉 bind_datadev/bind_primsel 的左右。
 
 // 没状态的全局对象：用宏生成 bind 函数，省得每个协议手写一遍
 #define DEFINE_BIND(NAME, IFACE, IMPL)                                            \
@@ -390,6 +327,4 @@ DEFINE_BIND(idleinhibit, zwp_idle_inhibit_manager_v1_interface, ii_mgr_impl)
 DEFINE_BIND(ksinhibit, zwp_keyboard_shortcuts_inhibit_manager_v1_interface, ksi_mgr_impl)
 DEFINE_BIND(xdgoutput, zxdg_output_manager_v1_interface, xo_mgr_impl)
 DEFINE_BIND(decoration, zxdg_decoration_manager_v1_interface, deco_mgr_impl)
-DEFINE_BIND(datadev, wl_data_device_manager_interface, ddm_impl)
-DEFINE_BIND(primsel, zwp_primary_selection_device_manager_v1_interface, psel_mgr_impl)
 
