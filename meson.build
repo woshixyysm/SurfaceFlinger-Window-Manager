@@ -38,6 +38,10 @@ proto_entries = [
   ['protocols/wayland-drm.xml', 'wayland-drm', '', false],
   ['protocols/wlr-layer-shell-unstable-v1.xml', 'wlr-layer-shell-unstable-v1', 'ns', false],
   ['protocols/wlr-screencopy-unstable-v1.xml', 'wlr-screencopy-unstable-v1', '', false],
+  # 这两个 wayland-protocols 1.49 里没有（input-method 只有 v1，virtual-keyboard 压根没有），
+  # 从 wlroots 的 protocol/ 目录 vendor 过来（wayland-scanner 校验通过）。
+  ['protocols/input-method-unstable-v2.xml', 'input-method-unstable-v2', '', false],
+  ['protocols/virtual-keyboard-unstable-v1.xml', 'virtual-keyboard-unstable-v1', '', false],
   ['stable/viewporter/viewporter.xml', 'viewporter', '', true],
   ['stable/presentation-time/presentation-time.xml', 'presentation-time', '', true],
   ['staging/fractional-scale/fractional-scale-v1.xml', 'fractional-scale-v1', '', true],
