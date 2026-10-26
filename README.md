@@ -1,5 +1,7 @@
 # sfwm
 
+[![ci](https://github.com/woshixyysm/SurfaceFlinger-Window-Manager/actions/workflows/ci.yml/badge.svg)](https://github.com/woshixyysm/SurfaceFlinger-Window-Manager/actions/workflows/ci.yml)
+
 用 **SurfaceFlinger** 当合成器的 Wayland compositor：每个 `xdg_toplevel` / `wl_surface`
 对应一个 `sf::Layer`，像素由 CPU 从客户端 dmabuf/shm 搬进 `ANativeWindow`。
 
