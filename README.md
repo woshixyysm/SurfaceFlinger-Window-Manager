@@ -24,10 +24,14 @@
 ## 构建
 
 ```sh
-meson setup build && ninja -C build          # 需要 meson + ninja
-# 或者沿用旧的单脚本构建：
-sh build-aux/build.sh
+# Termux / Android 上必须显式指定 clang：默认的 c++ 是 GCC 17（libstdc++），
+# 会把源码里乱序的 designated initializer 当错误。
+CC=clang CXX=clang++ meson setup build --prefix=$PREFIX
+ninja -C build                               # 产物 build/sfwm
 ```
+
+`--prefix` 必须给（默认 `/usr/local` 会让 `-idirafter` 全部落空）。
+协议清单（28 个 = 3 个私有 + 25 个系统 wayland-protocols）已全部写进 `meson.build`。
 
 ## 几个踩过的硬坑（别删注释里的说明）
 
@@ -36,6 +40,16 @@ sh build-aux/build.sh
 2. **全局注册那段代码在 `main()` 内部** → 不要往 `wl_global_create` 旁边插实现。
 3. **协议生成要 sed**：wlr-layer-shell 的参数名 `namespace` 是 C++ 关键字。
 4. **链接要 `-static-libgcc` + `-L.../opt/gcc-17/...`**：Termux 的 clang 默认找 libgcc。
+5. **编译器必须是 clang++**：meson 默认 `c++` = GCC 17，报
+   `designator order for field 'wp_fifo_v1_interface::set_barrier' does not match
+   declaration order`（源码里 designated initializer 是乱序的，clang 在 `-std=c++17`
+   下接受，GCC 不接受）。同时 `-D_GLIBCXX_ASSERTIONS=1` 是 libstdc++ 的信号，
+   看到它说明选错了编译器。
+6. **生成的协议 `.c` 不能放进 `static_library`**：`wl_interface` 结构体在 C++ 目标里
+   会变成内部链接 → 链接期一堆 `undefined symbol: xxx_interface`。
+   必须作为可执行文件的源直接编译（meson 按扩展名自动用 C 编）。
+7. **不要用 `pkg-config --cflags`**：`-I$PREFIX/include` 会把另一份 `sys/cdefs.h`
+   顶到 bionic 前面。只用它的 `--libs`，头文件一律 `-idirafter`。
 
 ## 架构上的三个关键决定
 
