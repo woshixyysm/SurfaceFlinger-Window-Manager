@@ -19,14 +19,19 @@
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-: "${NDK:?需要 NDK=<NDK 根目录>}"
-: "${DEPS:?需要 DEPS=<wayland/xkbcommon/libdrm 的安装前缀>}"
+NDK=${NDK:-}
+DEPS=${DEPS:-}
 WPDIR=${WPDIR:-/usr/share/wayland-protocols}
 API=${API:-24}
 OUT=${OUT:-$ROOT/ci-build}
 
 # ---- 定位工具链 ---------------------------------------------------------
 first_glob() { for f in $1; do [ -e "$f" ] && { echo "$f"; return 0; }; done; return 1; }
+
+# 定位 + 预检都放函数里，这样 PROTO_ONLY 时（没有 NDK）也能先跑协议那一段
+setup_toolchain() {
+[ -n "$NDK" ] || { echo "需要 NDK=<NDK 根目录>" >&2; exit 1; }
+[ -n "$DEPS" ] || { echo "需要 DEPS=<wayland/xkbcommon/libdrm 的安装前缀>" >&2; exit 1; }
 
 # 兼容「解压出来外面还套了一层目录」的情况
 if ! first_glob "$NDK/toolchains/llvm/prebuilt/*/bin/clang" >/dev/null 2>&1; then
@@ -58,12 +63,21 @@ for f in "$SYSROOT/usr/include/android/native_window.h" \
 done
 
 # libandroid.so / liblog.so 不一定在 sysroot/usr/lib/<triple>/ 根下 ——
-# 官方 NDK 放在 API 级别子目录（.../aarch64-linux-android/24/），自定义 NDK 可能
-# 干脆不提供 stub。所以别硬编码路径，改成“找到就用，找不到就降级链接”。
-SYSLIB=$(first_glob "$SYSROOT/usr/lib/aarch64-linux-android/$API" \
-                    "$SYSROOT/usr/lib/aarch64-linux-android" || true)
-ANDROID_SO=$(find "$SYSROOT/usr/lib" -name 'libandroid.so' 2>/dev/null | head -1 || true)
-LOG_SO=$(find "$SYSROOT/usr/lib" -name 'liblog.so' 2>/dev/null | head -1 || true)
+# 官方 NDK 放在 API 级别子目录（.../aarch64-linux-android/24/）。
+# ⚠️ 而且必须**只要 aarch64 的**：这个自定义 NDK 只带了 x86_64 的 stub，
+#    find 取第一个命中会给 aarch64 链接上 x86_64 的库。
+find_stub() {
+    _lib=$1
+    for _p in "$SYSROOT/usr/lib/aarch64-linux-android/$API/$_lib" \
+              "$SYSROOT/usr/lib/aarch64-linux-android/$_lib" \
+              "$SYSROOT/usr/lib/aarch64-linux-android"/*/"$_lib"; do
+        [ -e "$_p" ] && { echo "$_p"; return 0; }
+    done
+    return 1
+}
+
+ANDROID_SO=$(find_stub libandroid.so || true)
+LOG_SO=$(find_stub liblog.so || true)
 LENIENT=""
 ANDROID_LIBS=""
 if [ -n "$ANDROID_SO" ]; then
@@ -71,17 +85,19 @@ if [ -n "$ANDROID_SO" ]; then
     SYSLIB=$(dirname "$ANDROID_SO")
     ANDROID_LIBS="-landroid"
 else
-    echo "libandroid.so : 没找到"
+    echo "libandroid.so : aarch64 的没找到"
+    other=$(find "$SYSROOT/usr/lib" -name 'libandroid.so' 2>/dev/null | head -1 || true)
+    [ -n "$other" ] && echo "                 （只有别的架构的：$other，不能给 aarch64 用）"
 fi
 if [ -n "$LOG_SO" ]; then
     echo "liblog.so     : $LOG_SO"
     [ -n "${SYSLIB:-}" ] || SYSLIB=$(dirname "$LOG_SO")
     ANDROID_LIBS="$ANDROID_LIBS -llog"
 else
-    echo "liblog.so     : 没找到"
+    echo "liblog.so     : aarch64 的没找到"
 fi
 if [ -z "$ANDROID_LIBS" ]; then
-    echo "                这个 NDK 不带 bionic stub 库 → 降级为"
+    echo "                这个 NDK 没有 aarch64 的 bionic stub → 降级为"
     echo "                「允许未解析符号」的链接（验证的是能不能编过，不是可运行二进制）"
     LENIENT="-Wl,--unresolved-symbols=ignore-all"
 fi
@@ -89,7 +105,7 @@ if [ -n "${SYSLIB:-}" ] && [ -d "$SYSLIB" ]; then
     echo "syslib dir    : $SYSLIB"
 fi
 echo "预检通过"
-
+}
 # ---- 生成协议 -----------------------------------------------------------
 # 和 meson 用同一个脚本，保证 namespace 改名那条 sed 也一起验证到
 mkdir -p "$OUT/inc" "$OUT/obj"
@@ -99,18 +115,28 @@ import re, sys
 s = open(sys.argv[1], encoding="utf-8").read()
 pat = re.compile(r"\[\s*'([^']+)'\s*,\s*'([^']+)'\s*,\s*'([^']*)'\s*,\s*(true|false)\s*\]")
 for xml, base, ns, is_wp in pat.findall(s):
-    print(xml, base, ns, is_wp)
+    # ⚠️ 用 | 分隔：ns 常常为空，空格/制表符会在 read 时被 IFS 折叠，
+    #    导致字段整体左移（踩过：stable/xdg-shell 被当成仓库内 XML）
+    print("|".join([xml, base, ns, is_wp]))
 PY
 [ "$(wc -l < "$OUT/protos.txt")" -ge 20 ] || {
     echo "协议清单解析异常（只有 $(wc -l < "$OUT/protos.txt") 条）" >&2; exit 1; }
 
-while read -r xml base ns is_wp; do
+while IFS='|' read -r xml base ns is_wp; do
     # true = 系统 wayland-protocols 里的相对路径，false = 本仓库 protocols/ 下
     if [ "$is_wp" = "true" ]; then src="$WPDIR/$xml"; else src="$ROOT/$xml"; fi
-    [ -f "$src" ] || { echo "缺 XML: $src" >&2; exit 1; }
+    [ -f "$src" ] || { echo "缺 XML: $src（WPDIR=$WPDIR）" >&2; exit 1; }
     sh "$ROOT/build-aux/gen-proto.sh" "$src" "$OUT/inc" "$base" "$ns"
 done < "$OUT/protos.txt"
 echo "生成 $(ls "$OUT/inc"/*-protocol.c | wc -l) 个协议"
+
+# 只验证「协议解析 + 生成」这一段（没有 NDK 也能跑）
+if [ -n "${PROTO_ONLY:-}" ]; then
+    echo "PROTO_ONLY：协议部分完成，跳过编译"
+    exit 0
+fi
+
+setup_toolchain
 
 # ---- 编译 ---------------------------------------------------------------
 # ⚠️ 协议 .c 必须用 C 编译：用 C++ 编会让 wl_interface 变成内部链接，
