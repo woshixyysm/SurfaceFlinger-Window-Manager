@@ -31,6 +31,51 @@ jobs:
       - name: 结构检查 + 逐个生成 28 个协议
         run: python3 tools/check_structure.py --protogen --show-order
 
+  cross:
+    name: 交叉编译（自定义 NDK + Termux 头/库）
+    runs-on: ubuntu-latest
+    # ⚠️ 首轮试跑：本机（Windows/Termux）无法复现 GitHub runner 上的下载/解包路径，
+    #    所以先让失败不卡住仓库。第一次绿了以后把下面这行删掉，它就成了真闸门。
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 缓存 NDK
+        uses: actions/cache@v4
+        with:
+          path: ~/ndk-cache
+          key: ndk-custom-r30-x86_64-linux-gnu
+
+      - name: 取 NDK（android-ndk-custom r30，宿主 x86_64-linux-gnu）
+        run: |
+          set -euo pipefail
+          if [ ! -d "$HOME/ndk-cache/ndk" ]; then
+            mkdir -p "$HOME/ndk-cache"
+            curl -fL --retry 3 -o /tmp/ndk.tar.xz \
+              https://github.com/HomuHomu833/android-ndk-custom/releases/download/r30/android-ndk-r30-x86_64-linux-gnu.tar.xz
+            mkdir -p /tmp/ndk-extract
+            tar -xJf /tmp/ndk.tar.xz -C /tmp/ndk-extract
+            # 解出来可能还套一层目录，取唯一那个
+            inner=$(find /tmp/ndk-extract -maxdepth 1 -mindepth 1 -type d | head -1)
+            mv "$inner" "$HOME/ndk-cache/ndk"
+          fi
+          ls "$HOME/ndk-cache/ndk"
+          echo "NDK=$HOME/ndk-cache/ndk" >> "$GITHUB_ENV"
+
+      - name: 安装 wayland-scanner / wayland-protocols
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libwayland-bin wayland-protocols xz-utils
+
+      - name: 取 Termux 的 wayland / libxkbcommon / libdrm
+        run: sh build-aux/ci-fetch-termux-deps.sh "$RUNNER_TEMP/deps"
+
+      - name: 交叉编译
+        run: |
+          NDK="$NDK" DEPS="$RUNNER_TEMP/deps" OUT="$RUNNER_TEMP/out" \
+            sh build-aux/ci-cross-build.sh
+          ls -l "$RUNNER_TEMP/out/sfwm"
+
   lossless:
     name: 拆分无损（对拆分前单文件逐行比对）
     # 只在手动触发时跑：模块一旦有意修改（修 bug / 加功能），这项就该“失败”，
