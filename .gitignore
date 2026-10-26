@@ -1,0 +1,7 @@
+build/
+*.o
+*-protocol.h
+*-protocol.c
+/sfwm
+*.raw
+*.png

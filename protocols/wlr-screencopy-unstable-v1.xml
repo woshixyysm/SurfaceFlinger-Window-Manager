@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="wlr_screencopy_unstable_v1">
+  <copyright>
+    Copyright © 2018 Simon Ser
+    SPDX-License-Identifier: MIT
+  </copyright>
+
+  <interface name="zwlr_screencopy_manager_v1" version="3">
+    <description summary="manager to inform clients and begin capturing">
+      This object is a manager which offers requests to start capturing from a
+      source.
+    </description>
+
+    <request name="capture_output">
+      <description summary="capture an output"/>
+      <arg name="frame" type="new_id" interface="zwlr_screencopy_frame_v1"/>
+      <arg name="overlay_cursor" type="int"/>
+      <arg name="output" type="object" interface="wl_output"/>
+    </request>
+
+    <request name="capture_output_region">
+      <description summary="capture a region of an output"/>
+      <arg name="frame" type="new_id" interface="zwlr_screencopy_frame_v1"/>
+      <arg name="overlay_cursor" type="int"/>
+      <arg name="output" type="object" interface="wl_output"/>
+      <arg name="x" type="int"/>
+      <arg name="y" type="int"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </request>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the manager"/>
+    </request>
+  </interface>
+
+  <interface name="zwlr_screencopy_frame_v1" version="3">
+    <description summary="a frame ready for copy">
+      This object represents a single frame.
+    </description>
+
+    <event name="buffer">
+      <description summary="buffer information"/>
+      <arg name="format" type="uint" summary="buffer format"/>
+      <arg name="width" type="uint" summary="buffer width"/>
+      <arg name="height" type="uint" summary="buffer height"/>
+      <arg name="stride" type="uint" summary="buffer stride"/>
+    </event>
+    <event name="flags">
+      <description summary="frame flags"/>
+      <arg name="flags" type="uint" enum="flags"/>
+    </event>
+    <event name="ready">
+      <description summary="indicates that the frame is ready to be copied"/>
+      <arg name="tv_sec_hi" type="uint"/>
+      <arg name="tv_sec_lo" type="uint"/>
+      <arg name="tv_nsec" type="uint"/>
+    </event>
+    <event name="failed">
+      <description summary="indicates that the frame has failed"/>
+    </event>
+    <event name="damage" since="2">
+      <description summary="carries the coordinates of the damaged region"/>
+      <arg name="x" type="uint"/>
+      <arg name="y" type="uint"/>
+      <arg name="width" type="uint"/>
+      <arg name="height" type="uint"/>
+    </event>
+    <event name="linux_dmabuf" since="3">
+      <description summary="linux-dmabuf buffer information"/>
+      <arg name="format" type="uint" summary="buffer format"/>
+      <arg name="width" type="uint" summary="buffer width"/>
+      <arg name="height" type="uint" summary="buffer height"/>
+    </event>
+    <event name="buffer_done" since="3">
+      <description summary="all buffer types have been advertised"/>
+    </event>
+
+    <enum name="flags" bitfield="true">
+      <entry name="y_invert" value="1" summary="contents are y-inverted"/>
+    </enum>
+
+    <request name="copy">
+      <description summary="copy the frame"/>
+      <arg name="buffer" type="object" interface="wl_buffer"/>
+    </request>
+    <request name="copy_with_damage" since="2">
+      <description summary="copy the frame, with damage"/>
+      <arg name="buffer" type="object" interface="wl_buffer"/>
+    </request>
+    <request name="destroy" type="destructor">
+      <description summary="destroy the frame"/>
+    </request>
+  </interface>
+</protocol>
