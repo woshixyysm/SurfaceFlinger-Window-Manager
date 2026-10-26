@@ -63,16 +63,27 @@ done
 SYSLIB=$(first_glob "$SYSROOT/usr/lib/aarch64-linux-android/$API" \
                     "$SYSROOT/usr/lib/aarch64-linux-android" || true)
 ANDROID_SO=$(find "$SYSROOT/usr/lib" -name 'libandroid.so' 2>/dev/null | head -1 || true)
+LOG_SO=$(find "$SYSROOT/usr/lib" -name 'liblog.so' 2>/dev/null | head -1 || true)
 LENIENT=""
-ANDROID_LIBS="-landroid -llog"
+ANDROID_LIBS=""
 if [ -n "$ANDROID_SO" ]; then
     echo "libandroid.so : $ANDROID_SO"
     SYSLIB=$(dirname "$ANDROID_SO")
+    ANDROID_LIBS="-landroid"
 else
-    echo "libandroid.so : 没找到 —— 这个 NDK 不带 bionic stub 库"
-    echo "                降级为「只验证能编过、允许未解析符号」的链接（不产出可运行二进制）"
+    echo "libandroid.so : 没找到"
+fi
+if [ -n "$LOG_SO" ]; then
+    echo "liblog.so     : $LOG_SO"
+    [ -n "${SYSLIB:-}" ] || SYSLIB=$(dirname "$LOG_SO")
+    ANDROID_LIBS="$ANDROID_LIBS -llog"
+else
+    echo "liblog.so     : 没找到"
+fi
+if [ -z "$ANDROID_LIBS" ]; then
+    echo "                这个 NDK 不带 bionic stub 库 → 降级为"
+    echo "                「允许未解析符号」的链接（验证的是能不能编过，不是可运行二进制）"
     LENIENT="-Wl,--unresolved-symbols=ignore-all"
-    ANDROID_LIBS=""
 fi
 if [ -n "${SYSLIB:-}" ] && [ -d "$SYSLIB" ]; then
     echo "syslib dir    : $SYSLIB"
