@@ -8,6 +8,7 @@
 //   本机 SF 的 MediaProjection 镜像会过滤掉非 app 进程（root/ksu 域）创建的图层，
 //   所以安卓自带录屏抓不到我们的窗口；而 screencap 走整屏 DisplayCapture，
 //   实测能抓到。xdg-desktop-portal-wlr / OBS 的「屏幕捕捉」只要 shm XRGB8888。
+#pragma once
 #ifndef SFWM_SC_SCREENCOPY_HPP
 #define SFWM_SC_SCREENCOPY_HPP
 

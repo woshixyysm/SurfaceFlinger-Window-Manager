@@ -47,6 +47,12 @@ eol = b"\r\n" if b"\r" in lines[0] else b"\n"
 lines = [l.rstrip(b"\r") for l in lines]
 print("当前 sfwm.cpp: %d 行, eol=%s" % (len(lines), "CRLF" if eol == b"\r\n" else "LF"))
 
+# ⚠️ 安全门：这个脚本是给「还没拆过的单文件」用的。
+# 现在的 sfwm.cpp 只是一串 include，直接跑 --run 会把 24 个模块覆盖成一份残文件。
+if any(l.strip() == b'#include "core/prelude.hpp"' for l in lines):
+    sys.exit("sfwm.cpp 已经拆过了。这个脚本只对拆分前的单文件有效；\n"
+             "要复现拆分：git show 389c0f6:src/sfwm.cpp > /tmp/old.cpp 再配合 --run（见 README）。")
+
 # main 之前必须切完；main 的行号从切分表后自动探测
 main_i = None
 for i, l in enumerate(lines):
