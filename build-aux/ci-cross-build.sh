@@ -47,6 +47,18 @@ echo "sysroot : $SYSROOT"
 echo "target  : aarch64-linux-android$API"
 echo "deps    : $DEPS"
 
+# ---- 预检：把“环境不对”和“代码编不过”分开 -----------------------------
+$CLANG --version | head -1
+for f in "$SYSROOT/usr/include/android/native_window.h" \
+         "$SYSROOT/usr/lib/aarch64-linux-android/libandroid.so" \
+         "$DEPS/include/wayland-server-core.h" \
+         "$DEPS/include/xkbcommon/xkbcommon.h" \
+         "$DEPS/include/xf86drm.h" \
+         "$DEPS/lib/libwayland-server.so"; do
+    [ -e "$f" ] || { echo "❌ 预检失败，缺：$f" >&2; exit 1; }
+done
+echo "预检通过"
+
 # ---- 生成协议 -----------------------------------------------------------
 # 和 meson 用同一个脚本，保证 namespace 改名那条 sed 也一起验证到
 mkdir -p "$OUT/inc" "$OUT/obj"
