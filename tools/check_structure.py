@@ -162,20 +162,26 @@ ARTIFACT_RE = re.compile(r"(-protocol\.c|-protocol\.o|-server-protocol\.h|\.o$)"
 
 def check_artifacts():
     print("\n[4] 仓库里不能有生成物")
+    # 只查 git 已经跟踪的文件：工作区里自己 manual 构建留下的二进制不算问题
+    if not os.path.isdir(os.path.join(ROOT, ".git")):
+        print("  \u23ed  不是 git 仓库，跳过（CI 上一定会跑）")
+        notes.append("不是 git 仓库，跳过生成物检查")
+        return True
+    try:
+        tracked = subprocess.run(["git", "-C", ROOT, "ls-files"], check=True,
+                                 capture_output=True).stdout.decode("utf-8").split()
+    except (subprocess.CalledProcessError, OSError) as e:
+        notes.append("git ls-files 失败，跳过生成物检查: %s" % e)
+        return True
+
     bad = 0
-    for dirpath, dirnames, names in os.walk(ROOT):
-        dirnames[:] = [d for d in dirnames if d not in (".git", "build", "subprojects")]
-        for n in names:
-            p = os.path.join(dirpath, n)
-            rel = os.path.relpath(p, ROOT)
-            if ARTIFACT_RE.search(n):
-                fail("生成物被提交了: " + rel)
-                bad += 1
-            elif rel == "sfwm":
-                fail("编译产物被提交了: " + rel)
-                bad += 1
+    for rel in tracked:
+        n = os.path.basename(rel)
+        if ARTIFACT_RE.search(n) or rel == "sfwm":
+            fail("生成物被跟踪了: " + rel)
+            bad += 1
     if not bad:
-        ok("没有协议生成物 / 目标文件 / 二进制残留")
+        ok("被跟踪的 %d 个文件里没有协议生成物 / 目标文件 / 二进制" % len(tracked))
     return bad == 0
 
 
@@ -201,6 +207,8 @@ def check_protogen(wp_dir):
     if not scanner:
         notes.append("未安装 wayland-scanner，跳过实际生成（只校验 XML 存在）")
 
+    # 跟 meson 走完全同一条路：调 build-aux/gen-proto.sh（它里面带 namespace 改名）
+    gen = os.path.join(ROOT, "build-aux", "gen-proto.sh")
     tmp = tempfile.mkdtemp(prefix="sfwm-proto-")
     bad = 0
     for xml, base, ns, is_wp in protos:
@@ -211,25 +219,27 @@ def check_protogen(wp_dir):
             continue
         if not scanner:
             continue
-        h = os.path.join(tmp, base + "-server-protocol.h")
-        c = os.path.join(tmp, base + "-protocol.c")
         try:
-            subprocess.run([scanner, "server-header", path, h], check=True,
-                           capture_output=True)
-            subprocess.run([scanner, "private-code", path, c], check=True,
+            subprocess.run(["sh", gen, path, tmp, base, ns], check=True,
                            capture_output=True)
         except subprocess.CalledProcessError as e:
-            fail("wayland-scanner 失败: %s\n%s" % (xml, e.stderr.decode()[:300]))
+            fail("gen-proto.sh 失败: %s\n%s" % (xml, e.stderr.decode()[:300]))
             bad += 1
             continue
-        if ns and "namespace" in read(h):
-            fail("%s 生成的头里还有 C++ 关键字 namespace（gen-proto.sh 的 sed 没生效）" % base)
+        h = os.path.join(tmp, base + "-server-protocol.h")
+        c = os.path.join(tmp, base + "-protocol.c")
+        for f in (h, c):
+            if not os.path.isfile(f) or os.path.getsize(f) == 0:
+                fail("gen-proto.sh 没有产出 %s" % os.path.basename(f))
+                bad += 1
+        if os.path.isfile(h) and ns and re.search(r"\bnamespace\b", read(h)):
+            fail("%s 生成的头里还有 C++ 关键字 namespace（sed 没生效）" % base)
             bad += 1
-        if "wl_interface" not in read(c):
+        if os.path.isfile(c) and "wl_interface" not in read(c):
             fail("%s 生成的 .c 里没有 wl_interface" % base)
             bad += 1
     if not bad:
-        ok("%d 个协议全部可生成（私有 %d + 系统 %d）"
+        ok("%d 个协议全部生成成功（私有 %d + 系统 %d）"
            % (len(protos), sum(1 for p in protos if not p[3]), sum(1 for p in protos if p[3])))
     shutil.rmtree(tmp, ignore_errors=True)
     return bad == 0
