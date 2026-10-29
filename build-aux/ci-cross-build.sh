@@ -144,7 +144,9 @@ setup_toolchain
 CFLAGS="$TARGET -std=gnu11 -O2 -w -I$OUT/inc -isystem $DEPS/include"
 # Modules include each other relative to src/, the same way meson is configured with
 # include_directories('src'), so that directory has to be on the include path here too.
-CXXFLAGS="$TARGET -std=c++17 -O2 -w -g -I$ROOT/src -I$OUT/inc -isystem $DEPS/include"
+# libdrm keeps its headers one level down: xf86drm.h includes <drm.h>, which is why
+# pkg-config reports -I$PREFIX/include/libdrm and the same directory is added here.
+CXXFLAGS="$TARGET -std=c++17 -O2 -w -g -I$ROOT/src -I$OUT/inc -isystem $DEPS/include -isystem $DEPS/include/libdrm"
 
 echo "---- compiling protocol .c files as C ----"
 for c in "$OUT/inc"/*-protocol.c; do
