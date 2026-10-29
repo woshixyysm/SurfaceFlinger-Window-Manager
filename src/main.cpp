@@ -4,6 +4,9 @@
 // The project builds as a single translation unit: the include block below follows the
 // order of the original single-file source, and the modules share static globals, so
 // that order must be preserved when moving includes.
+//
+// The behaviour of individual protocols follows the compositors named in the "Prior art"
+// section of README.md; the comment where an approach was taken from one of them says so.
 
 #include "core/prelude.hpp"
 #include "core/config.hpp"
