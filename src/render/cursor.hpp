@@ -1,10 +1,11 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // cursor.hpp
 //
-// 光标几何绘制 + Xcursor 主题解析 + 上屏
+// Cursor geometry, Xcursor theme parsing and presentation.
 //
-// 从 sfwm.cpp 原样搬出（只搬不改，逻辑零差异）。
-// 依赖包含顺序：本文件用到的东西必须由**前面的**模块提供，
-// 因此它在 sfwm.cpp 里的 include 位置就是它原来在文件里的位置。
+// Extracted from the former single-file implementation; behaviour is unchanged.
+// Depends on include order: everything used here is provided by the modules
+// included before it in src/main.cpp.
 #pragma once
 
 static inline void cur_plot(int32_t x, int32_t y, uint32_t c) {
@@ -33,7 +34,7 @@ static void cur_line(int32_t x0, int32_t y0, int32_t x1, int32_t y1, uint32_t c)
     }
 }
 
-// 扫描线奇偶填充（pts 是 x0,y0,x1,y1,... 展平）
+// scanline even-odd fill, with points flattened as x0,y0,x1,y1
 static void cur_poly(const int32_t *p, int n, uint32_t c) {
     if (n > 16) n = 16;
     int32_t miny = 1 << 30, maxy = -(1 << 30);
@@ -65,7 +66,7 @@ static void cur_poly(const int32_t *p, int n, uint32_t c) {
     }
 }
 
-// 黑描边 + 白填充：把多边形顶点朝质心收缩 ~1.2px 再填白
+// black outline and white fill: shrink the vertices towards the centroid first
 static void cur_poly_ol(const int32_t *p, int n) {
     cur_poly(p, n, CUR_OPQ);
     int32_t q[32];
@@ -101,12 +102,12 @@ static void cur_disc(int32_t cx, int32_t cy, int32_t r, uint32_t c) {
     }
 }
 
-// ---- 主题加载：直接解析 Xcursor 文件
-// 不用 libwayland-cursor：本机那版 wl_cursor_image 没有 data 成员，而且它需要
-// 一个客户端侧的 wl_shm，我们只有服务端，读不到像素。Xcursor 格式很简单，自己读。
+// ---- theme loading, parsing Xcursor files directly
+// libwayland-cursor is not used: its wl_cursor_image has no data member here and it
+// needs a client side wl_shm, which a server does not have.
 static const char *cursor_shape_name(uint32_t s);
 
-// cursor-shape-v1 枚举 -> xcursor 文件名
+// cursor-shape-v1 enumeration to Xcursor file name
 static const char *cursor_shape_name(uint32_t s) {
     switch (s) {
     case 2:  return "context-menu";
@@ -146,7 +147,7 @@ static const char *cursor_shape_name(uint32_t s) {
     }
 }
 
-// xcursor 的"哈希文件名"算法（主题目录里常见纯十六进制文件名）
+// the Xcursor hashed file name scheme, used by the hex named files in themes
 static uint32_t xc_hash(const char *name) {
     uint32_t hash = 0, i = 0, len = (uint32_t)strlen(name);
     while (len--) {
@@ -162,7 +163,7 @@ static uint32_t rd32(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-// 读一个 Xcursor 文件，挑最接近 want 的尺寸
+// read an Xcursor file, picking the size closest to want
 static bool xc_load_file(const char *path, int32_t want, int32_t *ow, int32_t *oh,
                          int32_t *ohx, int32_t *ohy, uint32_t **opx) {
     FILE *f = fopen(path, "rb");
@@ -178,7 +179,7 @@ static bool xc_load_file(const char *path, int32_t want, int32_t *ow, int32_t *o
         uint8_t e[12];
         if (fread(e, 1, 12, f) != 12) break;
         uint32_t type = rd32(e), sub = rd32(e + 4), pos = rd32(e + 8);
-        if (type != 0xfffd0002u) continue;              // 只要 IMAGE 块
+        if (type != 0xfffd0002u) continue;              // IMAGE chunks only
         long save = ftell(f);
         if (fseek(f, (long)pos, SEEK_SET) != 0) { fseek(f, save, SEEK_SET); continue; }
         uint8_t ch[36];
@@ -209,7 +210,7 @@ static bool xc_load_file(const char *path, int32_t want, int32_t *ow, int32_t *o
     return true;
 }
 
-// 在 XCURSOR_PATH 里找 <theme>/cursors/<name>（先直名，再哈希名）
+// look for theme/cursors/name in XCURSOR_PATH, plain first, then hashed
 static bool xc_try(const char *dir, const char *theme, const char *name, int32_t want,
                    int32_t *w, int32_t *h, int32_t *hx, int32_t *hy, uint32_t **px) {
     char buf[700];
@@ -224,14 +225,14 @@ static bool xc_load(uint32_t shape, int32_t *w, int32_t *h, int32_t *hx, int32_t
     int32_t base = 24;
     const char *sz = getenv("XCURSOR_SIZE");
     if (sz && atoi(sz) > 0) base = atoi(sz);
-    // 光标画在**物理**像素坐标系里：g_scale=1 时 24px 在 1272x2800 的屏上太小了。
-    // 低于 2 倍统一按 2 倍（等效 48px），想更大用 XCURSOR_SIZE 覆盖。
+    // The cursor is drawn in physical pixels: 24 px is too small on a 1272x2800 output.
+    // Anything below 2x is treated as 2x, and XCURSOR_SIZE overrides it.
     const int32_t eff = (g_scale > 1 ? g_scale : 2);
     const int32_t want = base * eff;
 
-    // ⚠️ sfwm 由 root（su）拉起，su 经常把 XCURSOR_* 环境变量丢掉，HOME 也可能是
-    //    "/" —— 所以除了环境变量，必须把 Termux 的固定路径硬编码兜底，
-    //    否则永远找不到 ~/.icons/Bibata-Modern-Classic。
+    // sfwm is started through su, which drops XCURSOR_* and may leave HOME empty, so the
+    // fixed Termux paths are hard coded as a fallback, otherwise the theme in
+    // ~/.icons/Bibata-Modern-Classic is never found.
     char paths[768];
     int n = 0;
     const char *env = getenv("XCURSOR_PATH");
@@ -267,7 +268,7 @@ static bool xc_load(uint32_t shape, int32_t *w, int32_t *h, int32_t *hx, int32_t
                     char dir[320];
                     memcpy(dir, p, len); dir[len] = 0;
                     if (xc_try(dir, themes[ti], tryn[k], want, w, h, hx, hy, px)) {
-                        printf("[cursor] 命中 %s/%s/cursors/%s\n", dir, themes[ti], tryn[k]);
+                        printf("[cursor] hit %s/%s/cursors/%s\n", dir, themes[ti], tryn[k]);
                         return true;
                     }
                 }
@@ -275,15 +276,15 @@ static bool xc_load(uint32_t shape, int32_t *w, int32_t *h, int32_t *hx, int32_t
             }
         }
     }
-    printf("[cursor] 一条路径都没命中（shape=%u want=%d）paths=%s\n", shape, want, paths);
+    printf("[cursor] no path matched (shape=%u want=%d) paths=%s\n", shape, want, paths);
     return false;
 }
 
-// 双向箭头：dir 0=水平 1=垂直 2="/" 3="\"；thick 是线宽
+// bidirectional arrow: dir 0 horizontal, 1 vertical, 2 slash, 3 backslash
 static void cur_dbl_arrow(int dir, int32_t thick, uint32_t c) {
     const int32_t C = CUR_N / 2;
-    const int32_t lo = 2, hi = CUR_N - 3;           // 两端
-    const int32_t ah = 5;                            // 箭头半高
+    const int32_t lo = 2, hi = CUR_N - 3;           // the two ends
+    const int32_t ah = 5;                            // half height of the arrow head
     if (dir == 0) {
         cur_rect(lo, C, hi, C + thick - 1, c);
         cur_poly((int32_t[]){lo, C, lo + ah, C - ah, lo + ah, C + ah}, 3, c);
@@ -309,25 +310,25 @@ static void cursor_build(uint32_t shape) {
     g_cur_hx = g_cur_hy = 0;
     g_cur_mul = 1;
 
-    // ① 优先用真正的 X 光标主题（XCURSOR_THEME / XCURSOR_PATH / XCURSOR_SIZE）
+    // Prefer a real X cursor theme when one is configured.
     if (xc_load(shape, &g_cur_w, &g_cur_h, &g_cur_hx, &g_cur_hy, &g_cur_px)) {
         g_cur_mul = 1;
         g_cur_built = true;
-        printf("[cursor] 主题图 %dx%d hot=(%d,%d) shape=%u\n",
+        printf("[cursor] theme image %dx%d hot=(%d,%d) shape=%u\n",
                g_cur_w, g_cur_h, g_cur_hx, g_cur_hy, shape);
         return;
     }
-    printf("[cursor] 主题里没找到 shape=%u，退回内置箭头\n", shape);
+    printf("[cursor] shape=%u not in the theme, using the built-in arrow\n", shape);
 
-    // ② 兜底：程序化 24x24 箭头（主题缺失时不至于完全没光标）
+    // Fallback: a procedural 24x24 arrow, so there is always a cursor.
     g_cur_w = g_cur_h = CUR_N;
     g_cur_px = (uint32_t *)calloc((size_t)CUR_N * CUR_N, 4);
     if (!g_cur_px) { g_cur_w = g_cur_h = 0; return; }
     for (int i = 0; i < CUR_N * CUR_N; i++) g_cur_px[i] = CUR_CLR;
-    g_cur_mul = 0;      // 0 = 掉帧时按 g_scale 放大
+    g_cur_mul = 0;      // 0 means scale by g_scale when drawing
 
     switch (shape) {
-    case 9: case 10: {                     // text / vertical-text：I 形
+    case 9: case 10: {                     // text and vertical-text: I beam
         cur_rect(6, 2, 12, 4, CUR_OPQ);
         cur_rect(8, 2, 9, 20, CUR_OPQ);
         cur_rect(6, 18, 12, 20, CUR_OPQ);
@@ -337,17 +338,17 @@ static void cursor_build(uint32_t shape) {
         g_cur_hx = 9; g_cur_hy = 11;
         break;
     }
-    case 4: case 16: case 17: {            // pointer / grab / grabbing：手掌
+    case 4: case 16: case 17: {            // pointer, grab and grabbing: hand
         cur_disc(11, 15, 6, CUR_OPQ);
         cur_rect(4, 12, 17, 20, CUR_OPQ);
-        cur_rect(9, 3, 12, 15, CUR_OPQ);   // 食指
+        cur_rect(9, 3, 12, 15, CUR_OPQ);   // index finger
         cur_disc(11, 15, 4, CUR_WHT);
         cur_rect(6, 13, 15, 19, CUR_WHT);
         cur_rect(10, 4, 11, 14, CUR_WHT);
         g_cur_hx = 10; g_cur_hy = 4;
         break;
     }
-    case 7: case 8: {                      // cell / crosshair：准星
+    case 7: case 8: {                      // cell and crosshair: cross
         cur_rect(2, 10, CUR_N - 3, 12, CUR_OPQ);
         cur_rect(10, 2, 12, CUR_N - 3, CUR_OPQ);
         cur_rect(3, 11, CUR_N - 4, 11, CUR_WHT);
@@ -355,7 +356,7 @@ static void cursor_build(uint32_t shape) {
         g_cur_hx = 11; g_cur_hy = 11;
         break;
     }
-    case 13: case 32: {                    // move / all-scroll：四向
+    case 13: case 32: {                    // move and all-scroll: four arrows
         cur_dbl_arrow(0, 2, CUR_OPQ);
         cur_dbl_arrow(1, 2, CUR_OPQ);
         cur_dbl_arrow(0, 1, CUR_WHT);
@@ -413,7 +414,7 @@ static void cursor_build(uint32_t shape) {
         g_cur_hx = 10; g_cur_hy = 10;
         break;
     }
-    default: {                             // 默认箭头
+    default: {                             // default arrow
         cur_poly_ol((int32_t[]){0, 0, 14, 13, 8, 13, 11, 20, 8, 21, 5, 14, 0, 19}, 7);
         g_cur_hx = 0; g_cur_hy = 0;
         break;
@@ -422,7 +423,7 @@ static void cursor_build(uint32_t shape) {
     g_cur_built = true;
 }
 
-// 把光标贴到 (g_cur_x, g_cur_y)（物理坐标）
+// place the cursor at g_cur_x, g_cur_y in physical pixels
 static void cursor_present(void) {
     if (g_have_client_cursor) {
         if (g_cur_layer.win) {
@@ -442,20 +443,20 @@ static void cursor_present(void) {
         g_cur_layer.cap_w = pw;
         g_cur_layer.cap_h = ph;
         g_cur_layer.setTouchable(false);
-        // 关键：光标的 touchableRegion 已经是空的，但 Android 12+ 还会因为
-        // touchOcclusionMode=BLOCK_UNTRUSTED 把光标那块像素下的触摸吞掉。
-        // 必须显式声明“受信任覆盖层 + 丢弃所有输入”。
+        // The touchable region is already empty, but Android 12+ still swallows touches
+        // under the cursor through touchOcclusionMode, so the layer has to be declared
+        // trusted and to drop all input.
         if (!g_cur_layer.makeInputTransparent())
-            printf("[cursor] 警告：makeInputTransparent 失败（缺 setTrustedOverlay/setDropInputMode）\n");
+            printf("[cursor] warning: makeInputTransparent failed (no setTrustedOverlay or setDropInputMode)\n");
         ANativeWindow_setBuffersGeometry(g_cur_layer.win, pw, ph, WINDOW_FORMAT_RGBA_8888);
         g_cur_layer.setGeometry(sf::Rect{0, 0, pw, ph}, sf::Rect{0, 0, pw, ph});
         g_cur_lw = pw; g_cur_lh = ph;
     }
-    // ⚠️ 每次都要设：sf::Layer::create() 会把 m_touchable 重置回 true，
-    //    只在创建时设一次的话，指针一换尺寸（主题图 72x72 / 内置 24x24）光标层
-    //    就重新变成“可触摸”，把下面的窗口点击吃掉。
+    // This has to be set every time: sf::Layer::create() resets m_touchable, and a
+    // cursor layer rebuilt at a new size would eat clicks again.
+    
     g_cur_layer.setTouchable(false);
-    // 先 show + apply，ANativeWindow_lock 才有效（和 View::blit 里的顺序一致）
+    // Show and apply first, or ANativeWindow_lock fails; same order as in blit().
     g_cur_layer.place(g_cur_x - g_cur_hx * mul, g_cur_y - g_cur_hy * mul, g_base_z + 60000);
 
     ANativeWindow_Buffer ab;
@@ -464,7 +465,7 @@ static void cursor_present(void) {
         for (int32_t ly = 0; ly < g_cur_h; ly++) {
             for (int32_t lx = 0; lx < g_cur_w; lx++) {
                 uint32_t c = g_cur_px[ly * g_cur_w + lx];
-                // ARGB8888 -> RGBA8888（little endian 内存序 B,G,R,A）
+                // ARGB8888 to RGBA8888, that is memory order B,G,R,A on little endian
                 uint8_t b = (uint8_t)(c & 0xFF), gg = (uint8_t)((c >> 8) & 0xFF);
                 uint8_t r = (uint8_t)((c >> 16) & 0xFF), a = (uint8_t)((c >> 24) & 0xFF);
                 for (int32_t sy2 = 0; sy2 < mul; sy2++) {

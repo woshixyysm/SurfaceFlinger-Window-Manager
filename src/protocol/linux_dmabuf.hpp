@@ -1,16 +1,17 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // linux_dmabuf.hpp
 //
-// zwp_linux_dmabuf_v1（+ feedback）
+// zwp_linux_dmabuf_v1, including the v4 feedback object.
 //
-// 从 sfwm.cpp 原样搬出（只搬不改，逻辑零差异）。
-// 依赖包含顺序：本文件用到的东西必须由**前面的**模块提供，
-// 因此它在 sfwm.cpp 里的 include 位置就是它原来在文件里的位置。
+// Extracted from the former single-file implementation; behaviour is unchanged.
+// Depends on include order: everything used here is provided by the modules
+// included before it in src/main.cpp.
 #pragma once
 
 // ---------------------------------------------------------------- zwp_linux_dmabuf_v1
-// Mesa/zink 在 Wayland 上要求合成器支持 wl_drm 或 zwp_linux_dmabuf_v1，否则
-// egl_dri2 会断言 "software || dri2_dpy->fd_render_gpu >= 0" 而直接挂掉。
-// 这里提供 dmabuf 协议；真正的 buffer 导入（送进 SF）在下一步做。
+// Mesa and zink require wl_drm or zwp_linux_dmabuf_v1 on Wayland, otherwise egl_dri2
+// aborts with "software || dri2_dpy->fd_render_gpu >= 0". Only the protocol is provided
+// here; importing the buffers into SurfaceFlinger is done by the renderer.
 
 struct DmabufParams {
     DmabufBuf buf;
@@ -30,7 +31,7 @@ static void dmabuf_params_add(wl_client *, wl_resource *r, int32_t fd, uint32_t 
     if (!p) { close(fd); return; }
     if (plane_idx >= 4) {
         wl_resource_post_error(r, ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_PLANE_IDX,
-                               "plane_idx %u 太大", plane_idx);
+                               "plane_idx %u out of range", plane_idx);
         close(fd);
         return;
     }
@@ -51,7 +52,7 @@ static wl_resource *dmabuf_make_buffer(wl_client *c, DmabufParams *p, int32_t wi
     if (!br) { wl_client_post_no_memory(c); return nullptr; }
 
     DmabufBuf *b = new DmabufBuf();
-    *b = p->buf;              // fd 所有权转给 buffer
+    *b = p->buf;              // the buffer takes ownership of the fd
     b->w = width;
     b->h = height;
     b->drm_format = format;
@@ -67,7 +68,7 @@ static wl_resource *dmabuf_make_buffer(wl_client *c, DmabufParams *p, int32_t wi
     return br;
 }
 
-// 异步版：buffer 的资源由服务端分配（id=0 → wayland 自动分配），通过 created 事件送出
+// Asynchronous variant: the server allocates the buffer resource and announces it.
 static void dmabuf_params_create(wl_client *c, wl_resource *r, int32_t width, int32_t height,
                                  uint32_t format, uint32_t flags) {
     (void)flags;
@@ -75,7 +76,7 @@ static void dmabuf_params_create(wl_client *c, wl_resource *r, int32_t width, in
     if (!p) return;
     if (width <= 0 || height <= 0 || p->buf.nplanes == 0) {
         wl_resource_post_error(r, ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_INCOMPLETE,
-                               "参数不全 %dx%d planes=%d", width, height, p->buf.nplanes);
+                               "incomplete parameters %dx%d planes=%d", width, height, p->buf.nplanes);
         return;
     }
     wl_resource *br = dmabuf_make_buffer(c, p, width, height, format, 0);
@@ -83,7 +84,7 @@ static void dmabuf_params_create(wl_client *c, wl_resource *r, int32_t width, in
     zwp_linux_buffer_params_v1_send_created(r, br);
 }
 
-// 同步版（v2+）：客户端自己给 buffer id（注意 create_immed 的 buffer_id 在最前面）
+// Synchronous variant (v2+): the client supplies the buffer id.
 static void dmabuf_params_create_immed(wl_client *c, wl_resource *r, uint32_t buffer_id,
                                        int32_t width, int32_t height,
                                        uint32_t format, uint32_t flags) {
@@ -92,7 +93,7 @@ static void dmabuf_params_create_immed(wl_client *c, wl_resource *r, uint32_t bu
     if (!p) return;
     if (!dmabuf_make_buffer(c, p, width, height, format, buffer_id)) {
         wl_resource_post_error(r, ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_INCOMPLETE,
-                               "参数不全 %dx%d planes=%d", width, height, p->buf.nplanes);
+                               "incomplete parameters %dx%d planes=%d", width, height, p->buf.nplanes);
     }
 }
 
@@ -118,15 +119,15 @@ static void dmabuf_create_params(wl_client *c, wl_resource *r, uint32_t id) {
     });
 }
 
-// v4 新增的 surface feedback：我们不做直接扫描输出，但必须把格式表/设备告诉客户端，
-// 否则嵌套窗管（aquamarine）拿不到 allocator。
+// The v4 feedback: nothing is scanned out directly, but clients such as aquamarine need
+// the format table and the device to allocate buffers.
 static void dmabuf_feedback_destroy(wl_client *, wl_resource *r) { wl_resource_destroy(r); }
 static const struct zwp_linux_dmabuf_feedback_v1_interface dmabuf_feedback_impl = {
     .destroy = dmabuf_feedback_destroy,
 };
 
 static void dmabuf_send_feedback(wl_resource *f) {
-    // 格式表：每项 format(u32) + pad(u32) + modifier(u64)
+    // Format table entries: format (u32), padding (u32), modifier (u64).
     struct __attribute__((packed)) Entry { uint32_t format, pad; uint64_t mod; };
     Entry entries[2] = { { 0x34325241u, 0, 0 }, { 0x34325258u, 0, 0 } };
     const uint32_t sz = (uint32_t)sizeof(entries);
@@ -149,7 +150,7 @@ static void dmabuf_send_feedback(wl_resource *f) {
     zwp_linux_dmabuf_feedback_v1_send_tranche_target_device(f, &devarr);
     wl_array_release(&devarr);
 
-    zwp_linux_dmabuf_feedback_v1_send_tranche_flags(f, 0 /* SCANOUT 不开 */);
+    zwp_linux_dmabuf_feedback_v1_send_tranche_flags(f, 0 /* SCANOUT disabled */);
 
     struct wl_array idx;
     wl_array_init(&idx);
@@ -187,14 +188,14 @@ static const struct zwp_linux_dmabuf_v1_interface dmabuf_impl = {
 
 static void bind_dmabuf(wl_client *c, void *, uint32_t version, uint32_t id) {
     if (version > 4) version = 4;
-    printf("[sfwm] 客户端绑定了 zwp_linux_dmabuf_v1 (请求 v%u)\n", version);
+    printf("[sfwm] client bound zwp_linux_dmabuf_v1 (requested v%u)\n", version);
     wl_resource *r = wl_resource_create(c, &zwp_linux_dmabuf_v1_interface, version, id);
     if (!r) { wl_client_post_no_memory(c); return; }
     wl_resource_set_implementation(r, &dmabuf_impl, nullptr, nullptr);
     const uint32_t fmts[2] = { 0x34325241u /*ARGB8888*/, 0x34325258u /*XRGB8888*/ };
     for (int i = 0; i < 2; i++) {
         if (version >= 3) {
-            // v3 起用 modifiers 事件；只广告 LINEAR，够客户端分配用
+            // Since v3 modifiers are advertised; only LINEAR is offered, which suffices here.
             zwp_linux_dmabuf_v1_send_modifier(r, fmts[i], 0, 0);
         } else {
             wl_resource_post_event(r, ZWP_LINUX_DMABUF_V1_FORMAT, fmts[i]);

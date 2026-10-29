@@ -1,19 +1,19 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // testpat.hpp
 //
-// 自检图案（SFWM_TESTPAT，逐项验证不闪）
+// Self-test pattern (SFWM_TESTPAT), used to isolate flicker.
 //
-// 从 sfwm.cpp 原样搬出（只搬不改，逻辑零差异）。
-// 依赖包含顺序：本文件用到的东西必须由**前面的**模块提供，
-// 因此它在 sfwm.cpp 里的 include 位置就是它原来在文件里的位置。
+// Extracted from the former single-file implementation; behaviour is unchanged.
+// Depends on include order: everything used here is provided by the modules
+// included before it in src/main.cpp.
 #pragma once
 
 // ---------------------------------------------------------------- View
 
-// ── 合成测试图案：用来判定闪烁出在“上传路径”还是“客户端内容”
-//    SFWM_TESTPAT=1 时，每帧在图层缓冲上盖一层静态色块：
-//      顶部四块 红/绿/蓝/白 —— 完全静态，闪 = SurfaceFlinger 上传/合成路径有问题
-//      中间一条渐变细线 —— 有撕裂会看出来
-//      右下角滴答块 —— 每 post 一次换色，用来看更新节奏
+// Composite test pattern, used to tell whether flicker comes from the upload path or from
+// the client content. With SFWM_TESTPAT=1 a static pattern is drawn over the layer buffer:
+// four blocks at the top that never change, a gradient line that shows tearing, and a
+// ticking block in the bottom right that changes colour on every post.
 static int testpat_mode() {
     static int m = -2;
     if (m == -2) { const char *e = getenv("SFWM_TESTPAT"); m = e ? atoi(e) : 0; }
@@ -21,7 +21,7 @@ static int testpat_mode() {
 }
 static uint32_t g_tp_tick = 0;
 
-// 图层是 BGRA_8888：内存 B,G,R,A → 小端 uint32 = A<<24 | R<<16 | G<<8 | B
+// The layer is BGRA_8888, so a little endian uint32 is A<<24 R<<16 G<<8 B.
 static inline uint32_t tp_px(uint8_t r, uint8_t g, uint8_t b) {
     return 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
 }

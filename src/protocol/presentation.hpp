@@ -1,23 +1,25 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // presentation.hpp
 //
 // wp_presentation_feedback
 //
-// 从 sfwm.cpp 原样搬出（只搬不改，逻辑零差异）。
-// 依赖包含顺序：本文件用到的东西必须由**前面的**模块提供，
-// 因此它在 sfwm.cpp 里的 include 位置就是它原来在文件里的位置。
+// Extracted from the former single-file implementation; behaviour is unchanged.
+// Depends on include order: everything used here is provided by the modules
+// included before it in src/main.cpp.
 #pragma once
 
 // ---------------------------------------------------------------- wp_presentation
-// 客户端靠它拿到「这一帧什么时候上屏」。不给的话很多合成器/Hyprland 会退化到
-// 自己猜时序，帧率调度会抖。我们目前按 60Hz 报，时间戳用 CLOCK_MONOTONIC。
+// Clients use it to learn when a frame was presented. Without it compositors such as
+// Hyprland guess the timing and frame scheduling jitters. A 60 Hz refresh is reported
+// and timestamps use CLOCK_MONOTONIC.
 static uint64_t pres_refresh_ns(void) {
     return 16666666ull;
 }
 
 static void pres_fb_destroy(wl_client *, wl_resource *r) { wl_resource_destroy(r); }
 
-// wayland-scanner 没给 wp_presentation_feedback 生成 requests 结构
-// （该接口只有 destroy 一个请求），自己声明一份，布局与生成头一致。
+// wayland-scanner emits no requests struct for wp_presentation_feedback, whose only
+// request is destroy, so one is declared here with the same layout.
 struct pres_fb_iface_impl {
     void (*destroy)(struct wl_client *client, struct wl_resource *resource);
 };
@@ -25,13 +27,16 @@ static const struct pres_fb_iface_impl pres_fb_impl = {
     .destroy = pres_fb_destroy,
 };
 
-// 事件也直接 post，不依赖生成的 send_* 辅助函数
+// Events are posted directly, without the generated helpers.
 static void pres_fb_post_discarded(wl_resource *fr) {
-    wl_resource_post_event(fr, 1 /* discarded */);
+    wl_resource_post_event(fr, 2 /* discarded */);
 }
 static void pres_fb_post_presented(wl_resource *fr, uint32_t sec_hi, uint32_t sec_lo, uint32_t nsec,
                                    uint32_t refresh, uint32_t seq_hi, uint32_t seq_lo, uint32_t flags) {
-    wl_resource_post_event(fr, 0 /* presented */, sec_hi, sec_lo, nsec, refresh, seq_hi, seq_lo, flags);
+    // Event numbers: 0 is sync_output, which takes a wl_output object, 1 presented and
+    // 2 discarded. Posting the timestamp as event 0 marshals an object argument, and
+    // libwayland disconnects the client on the resulting protocol error.
+    wl_resource_post_event(fr, 1 /* presented */, sec_hi, sec_lo, nsec, refresh, seq_hi, seq_lo, flags);
 }
 
 static void pres_destroy(wl_client *, wl_resource *r) { wl_resource_destroy(r); }
@@ -65,9 +70,13 @@ static void bind_presentation(wl_client *c, void *, uint32_t version, uint32_t i
         return;
     }
     wl_resource_set_implementation(r, &pres_impl, nullptr, nullptr);
+    // The clock_id event is required: it tells clients which clock the presented
+    // timestamps use. Without it Mesa's wsi_common_wayland, vkcube and mpv receive an
+    // invalid clock source and abort in wsi_wl_convert_wayland_to_swapchain_time().
+    wp_presentation_send_clock_id(r, (uint32_t)CLOCK_MONOTONIC);
 }
 
-// blit 真正把像素贴上去之后调用：把所有待回执的 feedback 一次性报掉
+// Called after blit() put the pixels on screen: report every pending feedback.
 static void pres_send_presented(View *v) {
     if (!v || v->feedbacks.empty()) return;
 

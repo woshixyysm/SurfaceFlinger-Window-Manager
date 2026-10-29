@@ -1,17 +1,17 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // subcompositor.hpp
 //
-// wl_subcompositor（Qt/OBS 的内容面在这里）
+// wl_subcompositor, which carries the content surface of Qt and OBS.
 //
-// 从 sfwm.cpp 原样搬出（只搬不改，逻辑零差异）。
-// 依赖包含顺序：本文件用到的东西必须由**前面的**模块提供，
-// 因此它在 sfwm.cpp 里的 include 位置就是它原来在文件里的位置。
+// Extracted from the former single-file implementation; behaviour is unchanged.
+// Depends on include order: everything used here is provided by the modules
+// included before it in src/main.cpp.
 #pragma once
 
 // ---------------------------------------------------------------- wl_subcompositor
-// OBS 的预览区（program/preview monitor）不是普通 Qt 控件，而是一条独立子系统表面：
-// 客户端在它上面建 wl_egl_window 自己用 GL 渲染，再附到某个 wl_surface 的 sub-surface 上。
-// 没有这个全局对象，OBS 会报 "Can't create subsurface, not supported by the compositor"，
-// 然后整个预览区永远是黑的。
+// The OBS preview is not a widget but its own subsurface: the client renders into it with
+// GL through a wl_egl_window and attaches it to a parent surface. Without this global OBS
+// reports that subsurfaces are unsupported and the preview stays black.
 struct SubsurfData { View *v = nullptr; };
 
 static void sub_destroy(wl_client *, wl_resource *r) { wl_resource_destroy(r); }
@@ -24,12 +24,12 @@ static void sub_set_position(wl_client *, wl_resource *r, int32_t x, int32_t y) 
     if (d->v->mapped) d->v->place();
 }
 
-// 一律当成“在父之上”，OBS 只有一条预览子系统，不需要真正的兄弟排序
+// Everything is placed above the parent; OBS has a single preview subsurface.
 static void sub_place_above(wl_client *, wl_resource *, wl_resource *) {}
 static void sub_place_below(wl_client *, wl_resource *, wl_resource *) {}
 
-// sync 模式需要父提交时才生效；我们直接立即生效（desync 语义），
-// 对单个预览表面没有撕裂风险，但少一层状态机。
+// The sync mode would apply changes on the parent commit; changes apply immediately
+// here, which removes a state machine without tearing the single preview surface.
 static void sub_set_sync(wl_client *, wl_resource *) {}
 static void sub_set_desync(wl_client *, wl_resource *) {}
 
@@ -49,7 +49,7 @@ static void subcompositor_get_subsurface(wl_client *c, wl_resource *res, uint32_
     View *v = (View *)wl_resource_get_user_data(surface);
     View *p = (View *)wl_resource_get_user_data(parent);
     if (!v || !p || v == p) {
-        wl_resource_post_error(res, WL_SUBCOMPOSITOR_ERROR_BAD_SURFACE, "子表面参数非法");
+        wl_resource_post_error(res, WL_SUBCOMPOSITOR_ERROR_BAD_SURFACE, "invalid subsurface arguments");
         return;
     }
     wl_resource *r = wl_resource_create(c, &wl_subsurface_interface,
@@ -77,7 +77,7 @@ static void subcompositor_get_subsurface(wl_client *c, wl_resource *res, uint32_
         }
         delete dd;
     });
-    printf("[sfwm] 建立 subsurface（预览表面）\n");
+    printf("[sfwm] created subsurface (preview surface)\n");
 }
 
 static const struct wl_subcompositor_interface subcompositor_impl = {

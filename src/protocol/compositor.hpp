@@ -1,10 +1,11 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // compositor.hpp
 //
-// wl_compositor（建 surface/region）
+// wl_compositor: surfaces and regions.
 //
-// 从 sfwm.cpp 原样搬出（只搬不改，逻辑零差异）。
-// 依赖包含顺序：本文件用到的东西必须由**前面的**模块提供，
-// 因此它在 sfwm.cpp 里的 include 位置就是它原来在文件里的位置。
+// Extracted from the former single-file implementation; behaviour is unchanged.
+// Depends on include order: everything used here is provided by the modules
+// included before it in src/main.cpp.
 #pragma once
 
 // ---------------------------------------------------------------- wl_compositor
@@ -26,21 +27,21 @@ static void compositor_create_surface(wl_client *c, wl_resource *res, uint32_t i
         for (size_t i = 0; i < g_srv.views.size(); i++) {
             if (g_srv.views[i] == vv) { g_srv.views.erase(g_srv.views.begin() + i); break; }
         }
-        // 其它协议对象还挂着这个 View，先断开，避免悬空指针
+        // Detach the view from the other protocol objects before it goes away.
         if (vv->xdg_surface) wl_resource_set_user_data(vv->xdg_surface, nullptr);
         if (vv->toplevel) wl_resource_set_user_data(vv->toplevel, nullptr);
         if (vv->layer_surface) wl_resource_set_user_data(vv->layer_surface, nullptr);
         vv->xdg_surface = nullptr;
         vv->toplevel = nullptr;
         vv->layer_surface = nullptr;
-        // 从父表面的子列表里摘掉（子表面或父表面任意一方先销毁都要清）
+        // Remove the subsurface from its parent list; either side may be destroyed first.
         if (vv->sub_parent) {
             auto &s = vv->sub_parent->subs;
             for (size_t i = 0; i < s.size(); i++) if (s[i] == vv) { s.erase(s.begin() + i); break; }
             vv->sub_parent = nullptr;
         }
         vv->subs.clear();
-        // 焦点指向的 View 没了 → 立刻清掉，否则后面拿野指针发 enter/leave
+        // Drop the focus pointer, otherwise later enter and leave events use a stale view.
         if (g_srv.kb_focus == vv) g_srv.kb_focus = nullptr;
         if (g_srv.pointer_focus == vv) g_srv.pointer_focus = nullptr;
         if (g_srv.cursor_view == vv) g_srv.cursor_view = nullptr;
@@ -62,7 +63,7 @@ static const struct wl_compositor_interface compositor_impl = {
 };
 
 static void bind_compositor(wl_client *c, void *, uint32_t version, uint32_t id) {
-    if (version > 6) version = 6;   // v5 => wl_surface.offset；v6 只加了事件，没有新请求
+    if (version > 6) version = 6;   // v5 adds wl_surface.offset; v6 only adds events
     wl_resource *r = wl_resource_create(c, &wl_compositor_interface, version, id);
     if (!r) { wl_client_post_no_memory(c); return; }
     wl_resource_set_implementation(r, &compositor_impl, nullptr, nullptr);

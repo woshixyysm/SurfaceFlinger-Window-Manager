@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-"""结构检查 —— 在没有 Android/Termux 环境的机器上也能跑（CI 用）。
+"""Structural checks for the sfwm source tree. They run on any machine, without
+Android or Termux, and cover the invariants the project actually depends on:
 
-检查的都是这个项目真正的“不变式”，不是风格：
+  1. every local #include "..." resolves, starting from src/main.cpp;
+  2. every header under src/ is reachable from src/main.cpp;
+  3. the module graph has no include cycles; a cycle cannot compile in a single TU;
+  4. every header has #pragma once;
+  5. no generated files are committed: *-protocol.c, *.o, *-server-protocol.h and the
+     sfwm binary. A stale protocol header in src/ shadows the generated one in build/;
+  6. the protocol list in meson.build can be generated with wayland-scanner.
 
-  1. include 能否解析：sfwm.cpp 与所有模块里的 #include "..." 必须存在；
-  2. 无悬空模块：src/ 下每个 .hpp 都必须从 sfwm.cpp 可达（否则就是拆剩的孤儿）；
-  3. 无 include 环：模块之间不能成环（单 TU 里成环会真的编译不过）；
-  4. 每个模块都有 #pragma once；
-  5. 仓库里不能有生成物：*-protocol.c / *.o / *-server-protocol.h / 编译出的 sfwm
-     —— src/ 里残留的协议头会**遮蔽** meson 在 build/ 里新生成的那份（很隐蔽）；
-  6. 协议清单可用：解析 meson.build 的 proto_entries，逐个用 wayland-scanner 生成一遍。
-
-用法：
+Usage:
     python3 tools/check_structure.py
     python3 tools/check_structure.py --protogen --wp-dir /usr/share/wayland-protocols
 """
@@ -32,11 +31,11 @@ notes = []
 
 def fail(msg):
     fails.append(msg)
-    print("  \u274c " + msg)
+    print("  FAIL " + msg)
 
 
 def ok(msg):
-    print("  \u2705 " + msg)
+    print("  ok   " + msg)
 
 
 def read(path):
@@ -48,14 +47,14 @@ INC_RE = re.compile(r'^\s*#\s*include\s+"([^"]+)"', re.M)
 
 
 def local_includes(path):
-    """只返回能落到本仓库文件上的 include。"""
+    """Return the includes that resolve to files in this repository."""
     out = []
     for inc in INC_RE.findall(read(path)):
         cand = os.path.normpath(os.path.join(os.path.dirname(path), inc))
         if os.path.isfile(cand):
             out.append(cand)
         else:
-            # 相对 src/ 的写法（meson 里 include_directories('src')）
+            # Paths relative to src/, added by include_directories('src')
             cand2 = os.path.normpath(os.path.join(SRC, inc))
             if os.path.isfile(cand2):
                 out.append(cand2)
@@ -65,8 +64,8 @@ def local_includes(path):
 
 
 def check_includes():
-    print("\n[1] include 解析")
-    # 协议头是 meson 在 build/ 里现生成的，源码树里本来就没有 —— 但它们必须在清单里
+    print("\n[1] include resolution")
+    # Protocol headers are generated into build/, so they may be absent here.
     generated = {base + "-server-protocol.h" for _, base, _, _ in meson_protos()}
     bad = 0
     seen_gen = set()
@@ -80,11 +79,11 @@ def check_includes():
                     if r[1] in generated:
                         seen_gen.add(r[1])
                         continue
-                    fail("%s 里的 #include \"%s\" 找不到"
+                    fail("%s includes \"%s\", which does not exist"
                          % (os.path.relpath(p, ROOT), r[1]))
                     bad += 1
     if not bad:
-        ok("所有本地 include 都能解析（其中 %d 个是待生成的协议头，均在 meson 清单内）"
+        ok("all local includes resolve, %d of them generated protocol headers"
            % len(seen_gen))
     return bad == 0
 
@@ -98,16 +97,16 @@ def check_pragma_once():
                 continue
             p = os.path.join(dirpath, n)
             if "#pragma once" not in read(p):
-                fail("%s 缺少 #pragma once" % os.path.relpath(p, ROOT))
+                fail("%s has no #pragma once" % os.path.relpath(p, ROOT))
                 bad += 1
     if not bad:
-        ok("所有模块头都有 #pragma once")
+        ok("every module header has #pragma once")
     return bad == 0
 
 
 def walk_graph():
-    """从 sfwm.cpp 出发做 DFS，返回 (postorder, cycles)。"""
-    entry = os.path.join(SRC, "sfwm.cpp")
+    """Depth-first walk from src/main.cpp, returning (postorder, cycles)."""
+    entry = os.path.join(SRC, "main.cpp")
     post, state, cycles = [], {}, []
 
     def visit(p, stack):
@@ -130,13 +129,13 @@ def walk_graph():
 
 
 def check_graph():
-    print("\n[3] 模块图：可达性 / 环")
+    print("\n[3] module graph: reachability and cycles")
     post, cycles = walk_graph()
     if cycles:
         for c in cycles:
-            fail("include 成环: " + " -> ".join(os.path.relpath(x, ROOT) for x in c))
+            fail("include cycle: " + " -> ".join(os.path.relpath(x, ROOT) for x in c))
         return False
-    ok("无 include 环")
+    ok("no include cycles")
 
     reached = {os.path.normcase(x) for x in post}
     orphans = []
@@ -149,10 +148,10 @@ def check_graph():
                 orphans.append(os.path.relpath(p, ROOT))
     if orphans:
         for o in orphans:
-            fail("孤儿模块（没有任何地方 include 它）: " + o)
+            fail("orphan module, nothing includes it: " + o)
         return False
-    ok("src/ 下所有 .hpp 都可达，共 %d 个文件参与编译" % len(post))
-    notes.append("编译单元实际展开顺序（%d 个文件）：\n%s"
+    ok("every header under src/ is reachable, %d files in the build" % len(post))
+    notes.append("translation unit order, %d files:\n%s"
                  % (len(post), "\n".join("    " + os.path.relpath(x, ROOT) for x in post)))
     return True
 
@@ -161,27 +160,27 @@ ARTIFACT_RE = re.compile(r"(-protocol\.c|-protocol\.o|-server-protocol\.h|\.o$)"
 
 
 def check_artifacts():
-    print("\n[4] 仓库里不能有生成物")
-    # 只查 git 已经跟踪的文件：工作区里自己 manual 构建留下的二进制不算问题
+    print("\n[4] no generated files are tracked")
+    # Only tracked files matter; local build output is not a problem.
     if not os.path.isdir(os.path.join(ROOT, ".git")):
-        print("  \u23ed  不是 git 仓库，跳过（CI 上一定会跑）")
-        notes.append("不是 git 仓库，跳过生成物检查")
+        print("  skip  not a git repository, skipping")
+        notes.append("not a git repository, skipping the generated file check")
         return True
     try:
         tracked = subprocess.run(["git", "-C", ROOT, "ls-files"], check=True,
                                  capture_output=True).stdout.decode("utf-8").split()
     except (subprocess.CalledProcessError, OSError) as e:
-        notes.append("git ls-files 失败，跳过生成物检查: %s" % e)
+        notes.append("git ls-files failed, skipping the generated file check: %s" % e)
         return True
 
     bad = 0
     for rel in tracked:
         n = os.path.basename(rel)
         if ARTIFACT_RE.search(n) or rel == "sfwm":
-            fail("生成物被跟踪了: " + rel)
+            fail("generated file is tracked: " + rel)
             bad += 1
     if not bad:
-        ok("被跟踪的 %d 个文件里没有协议生成物 / 目标文件 / 二进制" % len(tracked))
+        ok("%d tracked files, none of them generated, object or binary" % len(tracked))
     return bad == 0
 
 
@@ -190,31 +189,31 @@ PROTO_RE = re.compile(
 
 
 def meson_protos():
-    # 直接在整份 meson.build 上套正则（不能先按 "[" / "]" 截块：每条记录自己就有一对括号）
+    # The regex runs over the whole meson.build, since each entry has its own brackets.
     s = read(os.path.join(ROOT, "meson.build"))
     return [(m.group(1), m.group(2), m.group(3), m.group(4) == "true")
             for m in PROTO_RE.finditer(s)]
 
 
 def check_protogen(wp_dir):
-    print("\n[5] 协议清单（meson.build proto_entries）")
+    print("\n[5] protocol list (proto_entries in meson.build)")
     protos = meson_protos()
     if len(protos) < 20:
-        fail("协议清单解析异常，只拿到 %d 项" % len(protos))
+        fail("cannot parse the protocol list, found %d entries" % len(protos))
         return False
 
     scanner = shutil.which("wayland-scanner")
     if not scanner:
-        notes.append("未安装 wayland-scanner，跳过实际生成（只校验 XML 存在）")
+        notes.append("wayland-scanner not installed, only checking that the XML exists")
 
-    # 跟 meson 走完全同一条路：调 build-aux/gen-proto.sh（它里面带 namespace 改名）
+    # Use the same path as meson: build-aux/gen-proto.sh, which renames namespace.
     gen = os.path.join(ROOT, "build-aux", "gen-proto.sh")
     tmp = tempfile.mkdtemp(prefix="sfwm-proto-")
     bad = 0
     for xml, base, ns, is_wp in protos:
         path = os.path.join(wp_dir, xml) if is_wp else os.path.join(ROOT, xml)
         if not os.path.isfile(path):
-            fail("XML 找不到: %s%s" % (xml, "（需要 wayland-protocols）" if is_wp else ""))
+            fail("XML not found: %s%s" % (xml, " (wayland-protocols required)" if is_wp else ""))
             bad += 1
             continue
         if not scanner:
@@ -223,23 +222,23 @@ def check_protogen(wp_dir):
             subprocess.run(["sh", gen, path, tmp, base, ns], check=True,
                            capture_output=True)
         except subprocess.CalledProcessError as e:
-            fail("gen-proto.sh 失败: %s\n%s" % (xml, e.stderr.decode()[:300]))
+            fail("gen-proto.sh failed on %s\n%s" % (xml, e.stderr.decode()[:300]))
             bad += 1
             continue
         h = os.path.join(tmp, base + "-server-protocol.h")
         c = os.path.join(tmp, base + "-protocol.c")
         for f in (h, c):
             if not os.path.isfile(f) or os.path.getsize(f) == 0:
-                fail("gen-proto.sh 没有产出 %s" % os.path.basename(f))
+                fail("gen-proto.sh did not produce %s" % os.path.basename(f))
                 bad += 1
         if os.path.isfile(h) and ns and re.search(r"\bnamespace\b", read(h)):
-            fail("%s 生成的头里还有 C++ 关键字 namespace（sed 没生效）" % base)
+            fail("%s still contains the C++ keyword namespace in the generated header" % base)
             bad += 1
         if os.path.isfile(c) and "wl_interface" not in read(c):
-            fail("%s 生成的 .c 里没有 wl_interface" % base)
+            fail("%s generated a .c file without wl_interface" % base)
             bad += 1
     if not bad:
-        ok("%d 个协议全部生成成功（私有 %d + 系统 %d）"
+        ok("%d protocols generated, %d local and %d from wayland-protocols"
            % (len(protos), sum(1 for p in protos if not p[3]), sum(1 for p in protos if p[3])))
     shutil.rmtree(tmp, ignore_errors=True)
     return bad == 0
@@ -247,13 +246,13 @@ def check_protogen(wp_dir):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--protogen", action="store_true", help="实际跑 wayland-scanner")
+    ap.add_argument("--protogen", action="store_true", help="run wayland-scanner")
     ap.add_argument("--wp-dir", default=os.environ.get(
         "SFWM_WAYLAND_PROTOCOLS", "/usr/share/wayland-protocols"))
-    ap.add_argument("--show-order", action="store_true", help="打印展开顺序")
+    ap.add_argument("--show-order", action="store_true", help="print the translation unit order")
     a = ap.parse_args()
 
-    print("sfwm 结构检查 @ " + ROOT)
+    print("sfwm structure check in " + ROOT)
     ok_all = True
     ok_all &= check_includes()
     ok_all &= check_pragma_once()
@@ -267,13 +266,13 @@ def main():
         for n in notes:
             print(n)
     elif notes:
-        print("\n（加 --show-order 可看编译单元展开顺序）")
+        print("\n(add --show-order to print the translation unit order)")
 
     print()
     if ok_all:
-        print("\u2705 结构检查通过")
+        print("structure check passed")
         return 0
-    print("\u274c 结构检查失败：%d 项" % len(fails))
+    print("structure check failed: %d problem(s)" % len(fails))
     return 1
 
 

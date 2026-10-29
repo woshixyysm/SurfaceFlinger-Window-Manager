@@ -1,16 +1,17 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // syncobj.hpp
 //
-// wp_linux_drm_syncobj_v1（显式同步）
+// wp_linux_drm_syncobj_v1, explicit synchronisation.
 //
-// 从 sfwm.cpp 原样搬出（只搬不改，逻辑零差异）。
-// 依赖包含顺序：本文件用到的东西必须由**前面的**模块提供，
-// 因此它在 sfwm.cpp 里的 include 位置就是它原来在文件里的位置。
+// Extracted from the former single-file implementation; behaviour is unchanged.
+// Depends on include order: everything used here is provided by the modules
+// included before it in src/main.cpp.
 #pragma once
 
 // ---------------------------------------------------------------- wp_linux_drm_syncobj_manager_v1
-// 真显式同步：客户端提交 dmabuf 时给出「acquire 时间点」，我们必须等它 signaled
-// 才能读这块 buffer；读完再 signal 它给的「release 时间点」，客户端才知道能复用。
-// 拿不到 syncobj 就退化成隐式同步（不阻塞），保证不会把整个合成器卡死。
+// The client submits an acquire point that has to be signalled before the buffer is read,
+// and a release point signalled after the read. Without syncobj support the compositor
+// falls back to implicit sync instead of blocking.
 static int g_sync_drm_fd = -1;
 
 static int sync_drm_fd(void) {
@@ -18,7 +19,7 @@ static int sync_drm_fd(void) {
     const char *dev = getenv("SFWM_DRM_DEVICE");
     g_sync_drm_fd    = open(dev && *dev ? dev : "/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
     if (g_sync_drm_fd < 0)
-        fprintf(stderr, "[syncobj] 打不开 drm 节点: %s\n", strerror(errno));
+        fprintf(stderr, "[syncobj] cannot open the DRM node: %s\n", strerror(errno));
     return g_sync_drm_fd;
 }
 
@@ -26,7 +27,7 @@ struct SyncTimeline {
     uint32_t handle = 0;
 };
 
-// timeline 接口只有 destroy 一个请求 → 生成头没有 requests 结构，自己声明
+// The timeline interface only has destroy, so its requests struct is declared here.
 struct sync_timeline_iface_impl {
     void (*destroy)(struct wl_client *client, struct wl_resource *resource);
 };
@@ -48,7 +49,7 @@ static void sync_import_timeline(wl_client *c, wl_resource *res, uint32_t id, in
     auto     *tl    = new SyncTimeline();
 
     if (drmfd < 0 || drmSyncobjFDToHandle(drmfd, fd, &tl->handle) != 0) {
-        printf("[syncobj] import_timeline 失败（drv 不支持 timeline syncobj？）\n");
+        printf("[syncobj] import_timeline failed; the driver may lack timeline syncobj\n");
         close(fd);
         delete tl;
         wl_resource_post_error(res, 0, "failed to import timeline");
@@ -117,10 +118,9 @@ static const struct wp_linux_drm_syncobj_manager_v1_interface sync_mgr_impl = {
     .import_timeline = sync_import_timeline,
 };
 
-// 探一下驱动到底支不支持 timeline syncobj。
-// 注意：本机 msm_drm（Adreno）两个节点都是 SYNCOBJ=0 / TIMELINE=0，
-// drmSyncobjCreate 直接 EOPNOTSUPP —— 驱动没开这个特性，内核 core 有也没用。
-// 支持才宣告，否则客户端会以为能用然后卡在等待上。
+// Probe for timeline syncobj support. The msm driver here reports SYNCOBJ=0 and
+// TIMELINE=0 and drmSyncobjCreate returns EOPNOTSUPP. The protocol is advertised only
+// when the driver supports it, otherwise clients wait on points that never signal.
 static bool syncobj_supported(void) {
     const int fd = sync_drm_fd();
     if (fd < 0) return false;
@@ -145,20 +145,20 @@ static void bind_syncobj(wl_client *c, void *, uint32_t version, uint32_t id) {
     wl_resource_set_implementation(r, &sync_mgr_impl, nullptr, nullptr);
 }
 
-// blit 前等 acquire 点，blit 后 signal release 点
+// Wait on the acquire point before blit, signal the release point after it.
 static void sync_wait_acquire(View *v) {
     if (!v || !v->sync_has_acq) return;
     const int drmfd = sync_drm_fd();
     if (drmfd < 0) return;
     uint32_t handles[1] = {v->sync_acq_handle};
     uint64_t points[1]  = {v->sync_acq_point};
-    // 最多等 100ms：客户端异常时宁可画个旧帧也不能把事件循环卡死
+    // wait at most 100 ms; a stalled client must not block the event loop
     const int ret = drmSyncobjTimelineWait(drmfd, handles, points, 1, 100ull * 1000ull * 1000ull,
                                           DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL, nullptr);
     if (ret != 0) {
         static int warn = 0;
         if (warn++ < 3)
-            printf("[syncobj] acquire 等待超时/失败 (point=%llu): %s\n",
+            printf("[syncobj] acquire wait failed or timed out (point=%llu): %s\n",
                    (unsigned long long)v->sync_acq_point, strerror(errno));
     }
     v->sync_has_acq = false;
@@ -173,7 +173,7 @@ static void sync_signal_release(View *v) {
     if (drmSyncobjTimelineSignal(drmfd, handles, points, 1) != 0) {
         static int warn = 0;
         if (warn++ < 3)
-            printf("[syncobj] signal release 失败 (point=%llu): %s\n",
+            printf("[syncobj] cannot signal release (point=%llu): %s\n",
                    (unsigned long long)v->sync_rel_point, strerror(errno));
     }
     v->sync_has_rel = false;
