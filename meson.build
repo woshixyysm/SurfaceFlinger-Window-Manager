@@ -1,10 +1,12 @@
 # sfwm - a Wayland compositor that uses SurfaceFlinger as its compositor
 #
 # Four build rules are required here:
-#   1. use clang++; the default c++ is GCC 17 with libstdc++
+#   1. name clang++ explicitly; a stock Termux points c++ at clang, but a local GCC
+#      toolchain ahead of it on PATH rejects the designated initialisers below
 #   2. take only the libraries from pkg-config, never its cflags, or
 #      -I$PREFIX/include shadows the bionic sys/cdefs.h
-#   3. compile the generated protocol .c files as C into the executable, since in
+#   3. compile the generated protocol .c files as C into the executable, since in C++
+#      wl_interface would become internal linkage
 #   4. cpp_std=c++17 is required, the source uses out of order designated initialisers
 project('sfwm', ['c', 'cpp'],
   default_options: ['cpp_std=c++17', 'buildtype=release', 'warning_level=0'])
@@ -20,16 +22,23 @@ add_project_arguments(
   language: ['c', 'cpp'])
 
 libdir  = join_paths(prefix, 'lib')
+
+# A local GCC toolchain installs its runtime outside lib/, so the directory is used when it
+# exists and skipped otherwise. Stock Termux does not need it.
+fs      = import('fs')
 gccdir  = join_paths(prefix, 'opt/gcc-17/lib/gcc/aarch64-linux-android/17.0.0')
 
 # Modules include each other with paths relative to src/, such as "core/config.hpp".
 # Such an include searches the including file's directory first, so src is on -I.
 inc = include_directories('src')
 ld_extra = [
-  '-L' + libdir, '-L' + gccdir,
+  '-L' + libdir,
   '-lwayland-server', '-ldrm', '-lxkbcommon', '-landroid', '-llog',
   '-static-libgcc', '-Wl,-rpath,' + libdir,
 ]
+if fs.is_dir(gccdir)
+  ld_extra += ['-L' + gccdir]
+endif
 
 # System protocols come from share/wayland-protocols, local ones from protocols/
 proto_entries = [
