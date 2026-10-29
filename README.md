@@ -49,12 +49,21 @@ protocols/                protocol XML vendored from wlroots and wayland-protoco
 build-aux/                protocol generation and the CI cross build
 tools/                    device-side helper scripts and the structure checker
 deps/                     Termux headers and libraries for the CI cross build
+doc/                      usage reference and driver notes
 ```
 
 The project is built as a single translation unit. Each module shares static globals with
 its neighbours, so `src/main.cpp` includes them in a fixed order and the order must not be
 changed. Making every global an `extern` declaration is a prerequisite for splitting the
 modules into separate translation units.
+
+## Documentation
+
+- [doc/usage.md](doc/usage.md): command line options, environment variables and every
+  command the control socket accepts.
+- [doc/driver-notes.md](doc/driver-notes.md): what Android and Adreno do that matters when
+  compositing through SurfaceFlinger, covering presentation, buffer synchronisation,
+  OpenGL ES and desktop GL, Vulkan, hardware video decode and input.
 
 ## Building
 
