@@ -109,13 +109,13 @@ with Android reports a different version, because it is a different GL implement
 ## Running
 
 ```sh
-./build/sfwm --size=1272x2800 --scale=3 --socket=sfwm-0
+./build/sfwm --size=1272x2800 --scale=1 --z=1000 --socket=sfwm-0
 ```
 
 | option | meaning |
 |---|---|
 | `--size=WxH` | physical size of the output |
-| `--scale=N` | logical scale factor, applied to the compositor's own UI |
+| `--scale=N` | logical scale factor, applied to the compositor's own UI. Text size is better raised with `SFWM_DPI`; see below |
 | `--z=N` | base z-order for content layers |
 | `--socket=NAME` | Wayland socket name |
 | `--grab` | take exclusive access to the touch device with `EVIOCGRAB` |
