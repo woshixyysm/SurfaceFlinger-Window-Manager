@@ -13,19 +13,21 @@
 //      read back, so no pixel is left at alpha 0 for SurfaceFlinger to blend the desktop
 //      through.
 //
-// One read-back remains. This Mesa build has no platform_android support, so there is no
+// One read-back remains. The Mesa build used here, a locally modified copy of the
+// mesa-for-android-container fork, has no platform_android support, so there is no
 // EGLSurface for an ANativeWindow and no eglSwapBuffers. The FBO is read with glReadPixels
 // into the buffer returned by ANativeWindow_lock, with GL_PACK_ROW_LENGTH carrying the
-// SurfaceFlinger stride. Rebuilding Mesa with platforms=android allows replacing that call
+// SurfaceFlinger stride. Building Mesa with platforms=android allows replacing that call
 // with eglCreateWindowSurface plus eglSwapBuffers, without changes above this file.
 //
 // The GL version is whatever the context reports; sfwm logs it once at startup as
 // "[gl] GPU composition ready: <GL_VERSION> | <GL_RENDERER>". On the development device
-// (OnePlus PLQ110, Adreno 830) with a locally built Mesa 26.2.5 driving the msm and KGSL
-// backend, that line reads 4.6 core profile and Adreno (TM) 830, alongside
-// EGL_EXT_image_dma_buf_import with modifiers and gbm_bo_create(LINEAR) yielding
-// modifier 0, which EGL imports directly. The values describe this Mesa build; the driver
-// shipped with Android reports a different version.
+// (OnePlus PLQ110, Adreno 830) with a Mesa 26.2.5 build derived from the
+// mesa-for-android-container fork and modified locally, the msm and KGSL backend reports
+// a 4.6 core profile and Adreno (TM) 830, alongside EGL_EXT_image_dma_buf_import with
+// modifiers and gbm_bo_create(LINEAR) yielding modifier 0, which EGL imports directly.
+// The values describe that build; neither upstream Mesa nor the driver shipped with
+// Android reports the same version.
 //
 // Set SFWM_GL=0 to fall back to the CPU copy.
 #pragma once
