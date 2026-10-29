@@ -67,7 +67,9 @@ proto_entries = [
   ['unstable/pointer-constraints/pointer-constraints-unstable-v1.xml', 'pointer-constraints-unstable-v1', '', true],
   ['unstable/idle-inhibit/idle-inhibit-unstable-v1.xml', 'idle-inhibit-unstable-v1', '', true],
   ['unstable/keyboard-shortcuts-inhibit/keyboard-shortcuts-inhibit-unstable-v1.xml', 'keyboard-shortcuts-inhibit-unstable-v1', '', true],
-  ['unstable/text-input/text-input-unstable-v3.xml', 'text-input-unstable-v3', '', true],
+  # Vendored rather than taken from wayland-protocols: the interface gained three requests
+  # in version 2, and a distribution copy older than that generates a struct without them.
+  ['protocols/text-input-unstable-v3.xml', 'text-input-unstable-v3', '', false],
   ['staging/xdg-activation/xdg-activation-v1.xml', 'xdg-activation-v1', '', true],
   ['unstable/xdg-output/xdg-output-unstable-v1.xml', 'xdg-output-unstable-v1', '', true],
   ['unstable/xdg-decoration/xdg-decoration-unstable-v1.xml', 'xdg-decoration-unstable-v1', '', true],
