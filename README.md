@@ -210,6 +210,41 @@ headers in `deps/`, because the project itself only compiles on Android.
   zero copy path.
 - Icons set through `xdg-toplevel-icon-v1` are accepted but not stored.
 
+## Prior art
+
+sfwm was written by reading the existing Wayland compositors and their protocol
+implementations, not from the protocol reference alone. Where a behaviour follows another
+implementation, the comment at that point names it.
+
+- **Weston**: protocol semantics. Selection is only sent to clients that hold keyboard
+  focus, and the data device and primary selection model follows its arrangement.
+- **wlroots and sway**: the protocols in `protocols/` are vendored from wlroots, and their
+  requests are handled the way wlroots based compositors expect. That covers
+  `zwlr_layer_shell_v1`, `zwlr_screencopy`, `zwlr_foreign_toplevel_manager`,
+  `zwlr_data_control`, `zwlr_virtual_pointer`, `zwlr_gamma_control` and
+  `zwlr_output_power_manager`.
+- **Hyprland**: the touch state machine, the decision to fix the owner of a gesture until
+  release, and the composer side zoom that changes only the layer geometry instead of
+  sending a configure.
+- **niri and quickshell**: the workspace and toplevel list protocols are implemented
+  against what their bars and taskbars bind.
+- **Mesa and turnip**: importing a dmabuf and calling into KGSL follow the order used in
+  `tu_knl_kgsl.cc`. The freedreno KGSL gallium backend itself comes from the
+  `mesa-for-android-container` fork.
+- **Android**: the layer flag values and the transaction ABI follow
+  `frameworks/native/include/gui/LayerState.h` and `SurfaceComposerClient`.
+
+The protocol XML files under `protocols/`, and the Wayland, xkbcommon, libdrm and Mesa
+libraries this links against, are third party code and remain under their own licences.
+
+## Development
+
+The code was written with a large language model used as an assistant, for drafting,
+reviewing and translating comments and messages. It was not given free rein: every change
+was compiled and exercised on the device, and the behaviour of each protocol was checked
+against the client that uses it. The comment blocks state why an approach was taken rather
+than only what the code does, which is what makes that review possible.
+
 ## License
 
 Copyright (C) 2026 the sfwm authors.
