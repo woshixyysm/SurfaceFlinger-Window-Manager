@@ -84,14 +84,18 @@ the machine this was developed on, not on a generic device:
 |---|---|
 | device | OnePlus PLQ110, Android 16, `aarch64` |
 | compiler | clang 21 from Termux (`gcc` and `g++` are symlinks to it) |
-| graphics stack | locally built Mesa 26.2.5 driving the msm and KGSL backend |
+| graphics stack | Mesa 26.2.5 derived from the `mesa-for-android-container` fork, with local changes |
 | GPU | Adreno 830 |
+
+The graphics stack is not upstream Mesa. The freedreno gallium backend used here comes
+from the `mesa-for-android-container` fork, which adds the KGSL driver under
+`src/freedreno/drm/kgsl` that upstream does not carry. The tree was then modified locally
+for this device, so the version string alone does not identify the code that was built.
 
 The GL version a user sees depends on the EGL implementation that is loaded, so sfwm logs
 it once at startup as `[gl] GPU composition ready: <GL_VERSION> | <GL_RENDERER>`. With the
-Mesa build above the line reports a 4.6 core profile and `Adreno (TM) 830`. The driver
-shipped with Android reports a different version, because it is a different GL
-implementation.
+build above the line reports a 4.6 core profile and `Adreno (TM) 830`. The driver shipped
+with Android reports a different version, because it is a different GL implementation.
 
 ## Running
 
