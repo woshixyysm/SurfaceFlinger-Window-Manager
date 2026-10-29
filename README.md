@@ -126,6 +126,58 @@ The process is normally started as root, because it reads `/dev/input` and creat
 SurfaceFlinger layers. The Wayland socket is made world writable so that clients running
 as an application user can connect; the runtime directory itself belongs to that user.
 
+### Starting it on the reference device
+
+The session script on the development machine starts the compositor like this. Everything
+after the binary name is part of this machine's setup and is described below, so it is a
+record of one working configuration rather than a requirement:
+
+```sh
+setsid env HOME=/data/data/com.termux/files/home \
+    XDG_RUNTIME_DIR=/data/local/tmp/sfwm-xdg \
+    LD_LIBRARY_PATH=$PREFIX/lib \
+    LD_PRELOAD="/data/local/tmp/libeglcompat.so /data/local/tmp/libfdshim.so \
+                /system/lib64/libnativewindow.so /system/lib64/libbinder_ndk.so \
+                /system/lib64/liblzma.so" \
+    SFWM_LIBEGL=$PREFIX/lib/libEGL.so.1 \
+    MESA_LOADER_DRIVER_OVERRIDE=msm \
+    LIBGL_DRIVERS_PATH=$PREFIX/lib/dri \
+    ./sfwm --size=1272x2800 --z=1000 --scale=1
+```
+
+- `XDG_RUNTIME_DIR` is a directory writable by both the compositor and the clients. A
+  directory under `/data/local/tmp` is used because the two run as different uids.
+- `LD_LIBRARY_PATH` points at the Termux prefix, which is where the Wayland and Mesa
+  libraries live. The process is started with `env -u LD_LIBRARY_PATH` when the system
+  libraries have to stay visible instead.
+- `LD_PRELOAD` carries the two shims this device needs: one maps the EGL entry points that
+  `libgui` expects onto the core names, the other redirects the DRM node to the KGSL node
+  and reports the driver name. The `/system/lib64` entries are the libraries those shims
+  link against. None of this is part of sfwm.
+- `SFWM_LIBEGL`, `MESA_LOADER_DRIVER_OVERRIDE` and `LIBGL_DRIVERS_PATH` select the Mesa
+  build and the msm driver, so that the GPU path is used instead of the CPU copy.
+- `--scale=1` with `SFWM_DPI` set instead is deliberate. Raising `--scale` shrinks the
+  logical space a client sees, which pushes windows larger than the output; raising the
+  reported DPI enlarges text while leaving the logical space intact.
+
+A start-up on that machine logs the display handshake, the protocol globals, the input
+device, the injection sockets and the keymap, in this order:
+
+```
+[sfwm] output 1272x2800 (logical 1272x2800), scale=1, base_z=1000, socket=sfwm-0
+[sf] SurfaceComposerClient = 0x...
+[screencopy] global registered (1272x2800, shm XRGB8888)
+[syncobj] driver has no DRM_CAP_SYNCOBJ_TIMELINE, protocol not advertised
+[out] reporting physical size 192x423 mm (dpi 168, output 1272x2800)
+[input] /dev/input/event6 'touchpanel' x[0,20351] y[0,44799]
+[kbd] injection socket: .../sfwm-keys.sock
+[kbd] keymap ready
+```
+
+A client connecting afterwards logs `[xwl] Xwayland bound xwayland_shell_v1`,
+`[input] new pointer` and `[kbd] new client bound the keyboard`, and `dump` on the control
+socket answers with the output size, the gesture owner and the pointer state.
+
 ## Protocols
 
 Clients are given the protocols they bind at startup, including:
@@ -176,6 +228,7 @@ for comparison and as a fallback when the EGL display cannot be created.
 | `SFWM_NO_DEFER` | read each shm frame immediately instead of one frame later |
 | `SFWM_DPI=N` | logical DPI reported through `wl_output` |
 | `SFWM_IME_RESERVE=1` | reserve the bottom of the output for the keyboard |
+| `SFWM_LIBEGL=/path/libEGL.so.1` | EGL library to load, ahead of the built-in search order |
 | `XCURSOR_THEME`, `XCURSOR_PATH`, `XCURSOR_SIZE` | cursor theme lookup |
 
 ## Control socket
@@ -208,7 +261,24 @@ reachable from `src/main.cpp`, that the module graph has no cycles, that every h
 `meson.build` can be generated with `wayland-scanner`.
 
 CI runs that check on every push. It also performs a cross build against the Termux
-headers in `deps/`, because the project itself only compiles on Android.
+headers in `deps/`, because the project itself only compiles on Android. Both jobs are
+required: a change that breaks the cross build fails the workflow rather than turning a
+job red in the background.
+
+The cross build is what keeps the source honest about portability, and it has caught two
+problems that the development device could not show:
+
+- `text-input-unstable-v3` gained three requests in version 2. A distribution copy older
+  than that generates an interface struct without them, so the protocol XML is vendored
+  under `protocols/` instead of being taken from `wayland-protocols` at build time;
+- `glob()` is not declared by every NDK header set, so the backlight lookup scans
+  `/sys/class/backlight` with `opendir` and `readdir` instead.
+
+What has been checked by hand on the device, beyond what CI can reach: the binary starts
+and binds SurfaceFlinger, registers the protocol globals, reads the touch device, opens the
+injection sockets and sends the keymap; Xwayland connects and binds `xwayland_shell_v1`,
+the seat and the keyboard; and the control socket answers `dump` with the output size, the
+gesture owner and the pointer position.
 
 ## Limitations
 
