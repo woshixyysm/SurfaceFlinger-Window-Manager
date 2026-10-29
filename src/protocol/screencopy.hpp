@@ -1,13 +1,14 @@
-// sc_screencopy.hpp —— zwlr_screencopy_manager_v1 的最简实现（只做 shm 路径）
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// screencopy.hpp - minimal zwlr_screencopy_manager_v1, shm path only.
 //
-// ⚠️ sfwm.cpp 顶部把协议头包在 extern "C" { } 里，本文件也被那个块包住，
-//    所以这里**不能出现任何 C++ 特性**（模板/namespace/std::vector 都会报
-//    "templates must have C++ linkage"）。全部用 C 写法。
+// src/main.cpp wraps the protocol headers in extern "C", and this file is inside
+// that block, so no C++ features may appear here; templates, namespaces and
+// std::vector all fail to compile.
 //
-// 为什么用 screencap：
-//   本机 SF 的 MediaProjection 镜像会过滤掉非 app 进程（root/ksu 域）创建的图层，
-//   所以安卓自带录屏抓不到我们的窗口；而 screencap 走整屏 DisplayCapture，
-//   实测能抓到。xdg-desktop-portal-wlr / OBS 的「屏幕捕捉」只要 shm XRGB8888。
+// Why screencap:
+// the MediaProjection mirror drops layers created by non-application processes,
+// so the stock recorder captures nothing, while screencap uses DisplayCapture
+// and works. Clients only need shm XRGB8888.
 #pragma once
 #ifndef SFWM_SC_SCREENCOPY_HPP
 #define SFWM_SC_SCREENCOPY_HPP
@@ -26,18 +27,41 @@ static const char *SC_TMP = "/data/local/tmp/.sfwm-sc.raw";
 
 typedef struct { int32_t w, h; } ScSize;
 
-// screencap 裸输出：u32 width, u32 height, u32 format, 然后像素（内存 R,G,B,A）
+// wl_shm is implemented here, in core/config.hpp, because the libwayland pool has
+// no offset support. wl_shm_buffer_get() matches on the implementation pointer,
+//   `wl_resource_instance_of(res, &wl_buffer_interface, &shm_buffer_interface)`
+// so buffers registered here never match and cannot be used to read pixels.
+// so it always returns NULL for buffers created here.
+// Any capture code relying on wl_shm_buffer_get() then fails silently.
+//   layout, so the parameters are read with the ShmBuf layout.
+//   The field order must match ShmPool and ShmBuf in core/config.hpp exactly.
+struct SfwmShmPoolView { int fd; int32_t size; uint8_t *base; };
+struct SfwmShmBufView {
+    uint32_t magic;
+    struct SfwmShmPoolView *pool;
+    int32_t offset;
+    int32_t w, h, stride;
+    uint32_t format;
+};
+#define SFWM_SHM_MAGIC 0x53464246u   /* 'SBFB' */
+
+// screencap output: u32 width, height, format, then pixels in memory order R,G,B,A.
 static int sc_grab_into_shm(struct wl_resource *buffer) {
-    struct wl_shm_buffer *shm = buffer ? wl_shm_buffer_get(buffer) : NULL;
-    if (!shm) return 0;
-    const int32_t bw = wl_shm_buffer_get_width(shm);
-    const int32_t bh = wl_shm_buffer_get_height(shm);
-    const int32_t bstride = wl_shm_buffer_get_stride(shm);
+    if (!buffer) return 0;
+    void *ud = wl_resource_get_user_data(buffer);
+    if (!ud) return 0;
+    struct SfwmShmBufView *sb = (struct SfwmShmBufView *)ud;
+    if (sb->magic != SFWM_SHM_MAGIC || !sb->pool || !sb->pool->base) {
+        printf("[screencopy] not an sfwm shm buffer, giving up\n");
+        return 0;
+    }
+    const int32_t bw = sb->w, bh = sb->h, bstride = sb->stride;
     if (bw <= 0 || bh <= 0 || bstride <= 0) return 0;
+    uint8_t *dst_base = sb->pool->base + sb->offset;
 
     char cmd[256];
     snprintf(cmd, sizeof cmd, "screencap > %s", SC_TMP);
-    if (system(cmd) != 0) { remove(SC_TMP); return 0; }
+    if (system(cmd) != 0) { remove(SC_TMP); printf("[screencopy] screencap failed\n"); return 0; }
     FILE *fp = fopen(SC_TMP, "rb");
     if (!fp) return 0;
 
@@ -49,14 +73,12 @@ static int sc_grab_into_shm(struct wl_resource *buffer) {
         const int32_t src_stride = sw * 4;
         row = (uint8_t *)malloc((size_t)src_stride);
         if (row) {
-            wl_shm_buffer_begin_access(shm);
-            uint8_t *base = (uint8_t *)wl_shm_buffer_get_data(shm);
             const int32_t rows = bh < sh ? bh : sh;
             const int32_t cols_max = bw < sw ? bw : sw;
             for (int32_t y = 0; y < rows; y++) {
                 if (fseek(fp, 12L + (long)((size_t)y * (size_t)src_stride), SEEK_SET) != 0) break;
                 if (fread(row, 1, (size_t)src_stride, fp) != (size_t)src_stride) break;
-                uint8_t *dst = base + (size_t)y * (size_t)bstride;
+                uint8_t *dst = dst_base + (size_t)y * (size_t)bstride;
                 for (int32_t x = 0; x < cols_max; x++) {
                     const uint8_t *p = row + (size_t)x * 4;
                     dst[x * 4 + 0] = p[2];   // B
@@ -65,7 +87,6 @@ static int sc_grab_into_shm(struct wl_resource *buffer) {
                     dst[x * 4 + 3] = 0xFF;
                 }
             }
-            wl_shm_buffer_end_access(shm);
             ok = 1;
         }
     }
@@ -87,7 +108,7 @@ static void sc_frame_copy(struct wl_client *c, struct wl_resource *res, struct w
     zwlr_screencopy_frame_v1_send_ready(res, (uint32_t)(ns >> 32),
                                         (uint32_t)(ns & 0xffffffffu), (uint32_t)ts.tv_nsec);
     if (buffer) wl_buffer_send_release(buffer);
-    printf("[screencopy] 已回传一帧\n");
+    printf("[screencopy] frame returned\n");
 }
 static void sc_frame_destroy(struct wl_client *c, struct wl_resource *res) {
     (void)c; wl_resource_destroy(res);
@@ -153,16 +174,16 @@ static void sc_bind(struct wl_client *c, void *data, uint32_t version, uint32_t 
                                                 (int)v, id);
     if (!res) { wl_client_post_no_memory(c); return; }
     wl_resource_set_implementation(res, &sc_man_impl, NULL, NULL);
-    printf("[screencopy] 客户端绑定 v%u\n", v);
+    printf("[screencopy] client bound v%u\n", v);
 }
 
 static void sc_screencopy_init(struct wl_display *dpy, int32_t w, int32_t h) {
     sc_w = w; sc_h = h;
     if (!wl_global_create(dpy, &zwlr_screencopy_manager_v1_interface, 3, NULL, sc_bind)) {
-        fprintf(stderr, "[screencopy] wl_global_create 失败\n");
+        fprintf(stderr, "[screencopy] wl_global_create failed\n");
         return;
     }
-    printf("[screencopy] global 已注册（%dx%d, shm XRGB8888）\n", w, h);
+    printf("[screencopy] global registered (%dx%d, shm XRGB8888)\n", w, h);
 }
 
 #endif  // SFWM_SC_SCREENCOPY_HPP

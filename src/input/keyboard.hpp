@@ -1,27 +1,32 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // keyboard.hpp
 //
-// wl_keyboard + text_input_v3 + IME + 控制命令
+// wl_keyboard, text_input_v3, input method handling and control commands.
 //
-// 从 sfwm.cpp 原样搬出（只搬不改，逻辑零差异）。
-// 依赖包含顺序：本文件用到的东西必须由**前面的**模块提供，
-// 因此它在 sfwm.cpp 里的 include 位置就是它原来在文件里的位置。
+// Extracted from the former single-file implementation; behaviour is unchanged.
+// Depends on include order: everything used here is provided by the modules
+// included before it in src/main.cpp.
 #pragma once
 
-// ---------------------------------------------------------------- wl_keyboard / 按键注入
+// Forward declaration; defined in protocol/workspace.hpp, which is included later.
+static void ws_activate(int idx);
+
+// ----------------------------------------------------- wl_keyboard and key injection
 //
-// 手机上没有物理键盘设备（/dev/input 里只有 gpio/pwrkey/touchpanel），
-// 所以键事件靠一个 unix socket 注入：$XDG_RUNTIME_DIR/sfwm-keys.sock
-//   t <文本>        —— 直接打字（裸行也当这个用）
-//   k <code> <0|1>  —— 原始 evdev keycode（KEY_A=30 等）
-//   s <keysym名>    —— 例如 s Return / s Escape / s Left
+// There is no physical keyboard on this device, so key events are injected through a
+// unix socket at $XDG_RUNTIME_DIR/sfwm-keys.sock, with these commands:
+//   t <text>        type text; a bare line is treated the same way
+//   k <code> <0|1>  raw evdev keycode, for example KEY_A is 30
+//   s <keysym>      for example s Return, s Escape, s Left
 static struct xkb_context *g_xkb_ctx = nullptr;
 static struct xkb_keymap  *g_xkb_keymap = nullptr;
 static struct xkb_state   *g_xkb_state = nullptr;
-static std::vector<uint32_t> g_pressed_keys;   // 当前按下的 evdev keycode
+static std::vector<uint32_t> g_pressed_keys;
+static std::vector<int> g_keymap_fds;   // see kb_send_keymap: never closed early; the second part is the evdev keycode
 
 static void kb_xkb_init() {
     if (g_xkb_keymap) return;
-    // Termux 的 xkb 数据不在 /usr/share/X11/xkb，环境变量没设的话补一个
+    // The Termux xkb data is not in /usr/share/X11/xkb, so set the variable when absent.
     if (!getenv("XKB_CONFIG_ROOT")) {
         const char *cand[] = { "/data/data/com.termux/files/usr/share/X11/xkb", nullptr };
         for (int i = 0; cand[i]; i++) {
@@ -29,7 +34,7 @@ static void kb_xkb_init() {
         }
     }
     g_xkb_ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
-    if (!g_xkb_ctx) { fprintf(stderr, "[kbd] xkb_context 创建失败\n"); return; }
+    if (!g_xkb_ctx) { fprintf(stderr, "[kbd] cannot create the xkb context\n"); return; }
     struct xkb_rule_names names;
     memset(&names, 0, sizeof(names));
     names.rules = "evdev";
@@ -38,13 +43,13 @@ static void kb_xkb_init() {
     g_xkb_keymap = xkb_keymap_new_from_names(g_xkb_ctx, &names, XKB_KEYMAP_COMPILE_NO_FLAGS);
     if (!g_xkb_keymap)
         g_xkb_keymap = xkb_keymap_new_from_names(g_xkb_ctx, nullptr, XKB_KEYMAP_COMPILE_NO_FLAGS);
-    if (!g_xkb_keymap) { fprintf(stderr, "[kbd] keymap 编译失败（XKB_CONFIG_ROOT 对不？）\n"); return; }
+    if (!g_xkb_keymap) { fprintf(stderr, "[kbd] cannot compile the keymap; check XKB_CONFIG_ROOT\n"); return; }
     g_xkb_state = xkb_state_new(g_xkb_keymap);
-    printf("[kbd] xkb keymap 就绪\n");
+    printf("[kbd] xkb keymap ready\n");
 }
 
-// 发 keymap 给某个 wl_keyboard（wayland 要求 fd + size）。
-// 用 sfwm_rt_file 而不是 memfd —— 见文件头那段说明（跨 MLS 收 fd 会被拒）。
+// Send the keymap to a wl_keyboard, which takes an fd and a size.
+// A runtime file is used instead of memfd; see the note in core/prelude.hpp.
 static void kb_send_keymap(wl_resource *r) {
     kb_xkb_init();
     if (!g_xkb_keymap) return;
@@ -64,8 +69,12 @@ static void kb_send_keymap(wl_resource *r) {
     if (off != len) { close(fd); return; }
     lseek(fd, 0, SEEK_SET);
     wl_keyboard_send_keymap(r, WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1, fd, (uint32_t)len);
-    close(fd);
-    printf("[kbd] 已下发 keymap (%zu 字节)\n", len);
+    // The fd must not be closed: libwayland sends it only on wl_display_flush, and closing
+    // it early hands the client a dead descriptor, which maps successfully but is empty,
+    // so strlen(keymap) runs off the end and raises SIGBUS.
+    // One fd leaks per keymap; a session sends a handful.
+    g_keymap_fds.push_back(fd);
+    printf("[kbd] keymap sent (%zu bytes, fd=%d left open)\n", len, fd);
 }
 
 static void kb_send_modifiers(uint32_t serial) {
@@ -87,7 +96,7 @@ static void kb_send_modifiers_to(wl_resource *k, uint32_t serial) {
     wl_keyboard_send_modifiers(k, serial, dep, lat, lock, grp);
 }
 
-// 只有「同一个客户端」的 keyboard 才能收到 enter/leave，否则 wl_resource 里的 id 对不上
+// enter and leave only go to keyboards of the same client; other ids are invalid.
 static bool kb_same_client(wl_resource *k, View *v) {
     if (!k || !v || !v->surface) return false;
     return wl_resource_get_client(k) == wl_resource_get_client(v->surface);
@@ -113,15 +122,15 @@ static void kb_send_enter_to(wl_resource *r, View *v) {
 }
 
 // ---------------------------------------------------------------- zwp_text_input_v3
-// 客户端（GTK/Qt/foot…）靠它声明「我要输入法」。合成器这边负责：
-//   enter/leave（跟随键盘焦点）、把注入器的文本用 commit_string 送进去、
-//   每次客户端 commit 后回一个 done（协议要求）。
-// 这是「中文能打字」的关键 —— 键盘注入走 US keymap 是没有 CJK keycode 的。
+// Clients declare that they want text input through it. The compositor handles:
+//   enter and leave following the keyboard focus, text from the injector through
+//   commit_string, and one done after every client commit.
+// This is what makes CJK input possible: the US keymap has no such keycodes.
 struct TiState {
     bool enabled = false;
     View *focus = nullptr;
     uint32_t hint = 0, purpose = 0;
-    uint32_t serial = 0;      // 协议要求：done 的 serial = commit 计数（这里收发共用一个递增计数器）
+    uint32_t serial = 0;      // the protocol wants done with the commit counter as serial
 };
 
 static void ti_destroyed(wl_resource *r) {
@@ -134,8 +143,8 @@ static void ti_destroy(wl_client *, wl_resource *r) { wl_resource_destroy(r); }
 static void ti_enable(wl_client *, wl_resource *r) {
     if (TiState *st = ti_state(r)) {
         st->enabled = true;
-        // 客户端「启用输入法」= 有输入框拿到焦点 —— 这就是要弹键盘的信号。
-        // 以前这步没人管，所以只能手动喊 ime on。
+        // Enabling text input means a text field took focus, which asks for the keyboard.
+        // Nothing acted on it before, so the keyboard had to be requested by hand.
         if (!g_ime_on) ime_send(true);
     }
 }
@@ -151,23 +160,23 @@ static void ti_set_content_type(wl_client *, wl_resource *r, uint32_t hint, uint
     if (TiState *st = ti_state(r)) { st->hint = hint; st->purpose = purpose; }
 }
 static void ti_set_cursor_rect(wl_client *, wl_resource *, int32_t, int32_t, int32_t, int32_t) {
-    // P2：内置软键盘要靠它避开光标
+    // Used to keep the built-in keyboard clear of the cursor.
 }
 static void ti_commit(wl_client *, wl_resource *r) {
-    // 客户端每次 commit 之后，合成器必须回 done（serial 用递增计数）
+    // The compositor answers every client commit with done.
     TiState *st = ti_state(r);
     uint32_t serial = st ? ++st->serial : 1;
     zwp_text_input_v3_send_done(r, serial);
 }
 static void ti_set_available_actions(wl_client *, wl_resource *, struct wl_array *) {}
 static void ti_show_panel(wl_client *, wl_resource *r) {
-    // 这就是「用户点了一下输入框、要弹键盘」的标准信号。以前只打印了一行日志，
-    // 所以点输入框没任何反应（enable 只在客户端第一次启用输入法时发一次）。
-    printf("[ti] show_input_panel -> 拉起键盘\n");
+    // This is the standard request to raise the keyboard, and was previously only logged,
+    // so tapping a text field did nothing.
+    printf("[ti] show_input_panel, raising the keyboard\n");
     if (!g_ime_on) ime_send(true);
 }
 static void ti_hide_panel(wl_client *, wl_resource *r) {
-    printf("[ti] hide_input_panel -> 收起键盘\n");
+    printf("[ti] hide_input_panel, hiding the keyboard\n");
     if (g_ime_on) ime_send(false);
 }
 static const struct zwp_text_input_v3_interface ti_impl = {
@@ -201,7 +210,7 @@ static void ti_update_focus(View *oldv, View *newv) {
     }
 }
 
-// 有 enabled 的 text-input 就用 commit_string（支持任意 UTF-8，含中文）
+// Use commit_string when text input is enabled; it carries any UTF-8.
 static bool ti_commit_text(const char *utf8) {
     View *v = g_srv.kb_focus;
     bool sent = false;
@@ -216,8 +225,8 @@ static bool ti_commit_text(const char *utf8) {
     return sent;
 }
 
-// 拼音/组词阶段（还没上屏）走 preedit_string，客户端会画成带下划线的预编辑串。
-// 传空串 = 清掉预编辑（finishComposingText）。
+// Preedit covers the composition stage, which clients draw as underlined text.
+// An empty string clears the preedit.
 static bool ti_preedit_text(const char *utf8) {    View *v = g_srv.kb_focus;
     bool sent = false;
     uint32_t len = 0;
@@ -245,7 +254,7 @@ static void ti_mgr_get(wl_client *c, wl_resource *mgr, uint32_t id, wl_resource 
         delete (TiState *)wl_resource_get_user_data(res);
     });
     g_srv.text_inputs.push_back(r);
-    printf("[ti] 新 text-input (v%u)\n", ver);
+    printf("[ti] new text-input (v%u)\n", ver);
     if (g_srv.kb_focus) ti_update_focus(nullptr, g_srv.kb_focus);
 }
 static const struct zwp_text_input_manager_v3_interface ti_mgr_impl = {
@@ -260,19 +269,19 @@ static void bind_ti_mgr(wl_client *c, void *, uint32_t version, uint32_t id) {
 }
 
 /**
- * 强制让所有客户端「退出输入法焦点」。
+  * Make every client leave its text input focus.
  *
- * 这是「安卓那边把键盘收掉了」时该做的事：用户一个返回手势把键盘划走，
- * 桌面这边 GTK 的输入框却还挂着 IME 焦点（光标还在闪、还在等输入法），
- * 两边状态就脱节了。发 disable + leave，客户端才会真正 focus_out 掉输入法上下文。
+  * This is what to do when Android hides the keyboard: the gesture removes it while the
+  * focused GTK entry keeps waiting for input, so the two sides drift apart.
+  * disable and leave make the client drop its input method context.
  */
 static void ti_force_disable() {
     int n = 0;
     for (wl_resource *r : g_srv.text_inputs) {
         TiState *st = ti_state(r);
         if (!st) continue;
-        // text-input-v3 里 disable 是「客户端→服务端」的 request，服务端没有对应事件。
-        // 服务端能让客户端 focus_out 的手段只有一个：发 leave(null) —— surface 为空即「离开当前输入目标」。
+        // disable is a client request in text-input-v3, with no matching server event.
+        // leave(NULL) is the only way to make a client leave its text input target.
         if (st->enabled || st->focus) {
             zwp_text_input_v3_send_leave(r, nullptr);
             st->focus = nullptr;
@@ -281,12 +290,12 @@ static void ti_force_disable() {
             n++;
         }
     }
-    if (n) printf("[ti] 键盘被系统收起 -> 已让 %d 个客户端退出输入法焦点\n", n);
+    if (n) printf("[ti] keyboard hidden by the system, %d clients left text input focus\n", n);
 }
 
-// ---------------------------------------------------------------- 输入法状态通道
-// 为什么不走 socket：模块是个 untrusted_app，连不进我们的 unix socket，TCP 5599 也不可靠。
-// 它写自己数据目录里的一个文件（只 app 自己能写），我们用 root 把它读出来。
+// ------------------------------------------------- input method state channel
+// The module runs as an untrusted app and cannot reach the unix socket or TCP 5599, so
+// it writes a file in its own data directory that is read here as root.
 static const char *IME_STATE_FILE = "/data/data/org.sfwm.ime/files/ime-state";
 static wl_event_source *g_ime_timer = nullptr;
 
@@ -296,8 +305,8 @@ static void ime_apply(int32_t h, bool on) {
     g_ime_h = h;
     g_ime_on = on;
     if (!on) ti_force_disable();
-    // 注意：不能只 place() —— 裁剪写在 blit() 里，而客户端画完一帧就不再送帧，
-    // 高度变化时不会有新帧来触发它。所以这里必须主动重发一次 setGeometry。
+    // place() alone is not enough: the crop is applied in blit(), and a client that finished
+    // drawing sends no more frames, so setGeometry is re-sent explicitly.
     for (View *v : g_srv.views) {
         if (!v->mapped || v->is_x_root) continue;
         v->place();
@@ -306,20 +315,20 @@ static void ime_apply(int32_t h, bool on) {
                                  sf::Rect{0, 0, v->bw, v->bh});
         }
     }
-    printf("[ime] 控件状态: 高=%d 键盘=%s\n", g_ime_h, on ? "显示" : "隐藏");
-    // 键盘收起时必须把它的图层也藏掉 —— 否则它会以“最后一帧”（通常是一整块不透明背景）
-    // 一直盖在窗口底部，而且还会吃掉点击（表现为“不该遮挡的时候遮挡”）。
+    printf("[ime] state: height=%d keyboard=%s\n", g_ime_h, on ? "shown" : "hidden");
+    // Hide the layer when the keyboard is hidden; otherwise its last frame, usually an
+    // opaque background, keeps covering the bottom of the window and eats clicks.
     for (View *v : g_srv.views)
         if (v->is_ime && v->layer.win) {
             v->layer.setVisible(on);
-            printf("[ime] 输入法图层 -> %s\n", on ? "显示" : "隐藏");
+            printf("[ime] input method layer -> %s\n", on ? "shown" : "hidden");
         }
 }
 
 static int on_ime_tick(void *) {
-    // 键盘上沿（来自 dumpsys，一次性文件）：高度 = 屏幕高 - 上沿
-    // 注意：不再读 app 写的那份状态文件 —— 它只能是 208/0（insets 相对窗口算，不可信），
-    // 会和这里算出的 1024 互相覆盖，造成画面抽插。
+    // Keyboard top edge from a one-shot dumpsys file; height is the screen height minus it.
+    // The app state file is no longer read: its values are relative to the window and
+    // would fight with the value computed here.
     if (g_ime_on) {
         const char *inset = "/data/local/tmp/sfwm-ime-inset";
         FILE *g = fopen(inset, "r");
@@ -328,19 +337,19 @@ static int on_ime_tick(void *) {
             if (fscanf(g, "%d", &top) == 1 && top > 0 && top < g_out_h) {
                 int32_t h = g_out_h - top;
                 if (h > 0 && h != g_ime_h) {
-                    printf("[ime] 从窗口几何取到高度 = %d（上沿 %d）\n", h, top);
+                    printf("[ime] height %d taken from the window geometry (top %d)\n", h, top);
                     ime_apply(h, true);
                 }
             }
             fclose(g);
-            unlink(inset);      // 一次性，避免收起后又把它读回来
+            unlink(inset);      // one shot, so it is not read back after collapsing
         }
     }
     if (g_ime_timer) wl_event_source_timer_update(g_ime_timer, 300);
     return 0;
 }
 
-// 最上层的普通 toplevel（没有指针焦点时兜底用）
+// The topmost ordinary toplevel, used when the pointer has no focus.
 static View *front_view() {
     View *best = nullptr;
     int32_t bestz = -0x7fffffff;
@@ -352,7 +361,7 @@ static View *front_view() {
     return best;
 }
 
-static void dd_focus_changed(View *v);   // protocol/data_device.hpp（剪贴板跟焦点走）
+static void dd_focus_changed(View *v);   // protocol/data_device.hpp: the clipboard follows focus
 
 static void kb_set_focus(View *v) {
     if (v == g_srv.kb_focus) return;
@@ -364,9 +373,9 @@ static void kb_set_focus(View *v) {
                 wl_keyboard_send_leave(k, serial, g_srv.kb_focus->surface);
     }
     g_srv.kb_focus = v;
-    printf("[kbd] 焦点 -> %s\n", v ? (v->title[0] ? v->title : "view") : "(无)");
-    ti_update_focus(old_focus, v);   // text-input 的 enter/leave 跟着键盘焦点走
-    // 换焦点时把按下的键全放掉，避免卡键
+    printf("[kbd] focus -> %s\n", v ? (v->title[0] ? v->title : "view") : "(none)");
+    ti_update_focus(old_focus, v);   // text input enter and leave follow the keyboard focus
+    // Release every held key on a focus change, so none stays stuck.
     for (uint32_t kc : g_pressed_keys) {
         for (wl_resource *k : g_srv.keyboards)
             if (kb_same_client(k, v))
@@ -379,13 +388,13 @@ static void kb_set_focus(View *v) {
     if (v) {
         for (wl_resource *k : g_srv.keyboards) kb_send_enter_to(k, v);
     }
-    dd_focus_changed(v);   // 新焦点客户端拿到剪贴板；老的收到 selection(NULL)
+    dd_focus_changed(v);   // the new client receives the clipboard, the old one selection(NULL)
 }
 
 static void kb_key(uint32_t code, bool pressed) {
-    if (g_srv.keyboards.empty()) { printf("[kbd] 没有客户端在听键盘\n"); return; }
+    if (g_srv.keyboards.empty()) { printf("[kbd] no client is listening for keys\n"); return; }
     if (!g_srv.kb_focus) kb_set_focus(front_view());
-    if (!g_srv.kb_focus) { printf("[kbd] 没有可聚焦窗口，丢弃按键 %u\n", code); return; }
+    if (!g_srv.kb_focus) { printf("[kbd] no focusable window, dropping key %u\n", code); return; }
     kb_xkb_init();
     if (g_xkb_state)
         xkb_state_update_key(g_xkb_state, code + 8, pressed ? XKB_KEY_DOWN : XKB_KEY_UP);
@@ -408,11 +417,11 @@ static void kb_key(uint32_t code, bool pressed) {
     static int key_logs = 0;
     if (key_logs++ < 12)
         printf("[kbd] -> code=%u %s (keyboards=%zu focus=%s)\n", code,
-               pressed ? "按下" : "抬起", g_srv.keyboards.size(),
-               g_srv.kb_focus ? (g_srv.kb_focus->title[0] ? g_srv.kb_focus->title : "view") : "无");
+               pressed ? "down" : "up", g_srv.keyboards.size(),
+               g_srv.kb_focus ? (g_srv.kb_focus->title[0] ? g_srv.kb_focus->title : "view") : "none");
 }
 
-// 找一个能产生该 keysym 的 keycode（先试 level0，再试 level1=Shift）
+// Find a keycode producing the keysym, trying level 0 and then level 1.
 static bool kb_find_keycode(xkb_keysym_t sym, uint32_t *code, bool *need_shift) {
     if (!g_xkb_keymap) return false;
     for (xkb_keycode_t kc = 9; kc < 256; kc++) {
@@ -426,7 +435,7 @@ static bool kb_find_keycode(xkb_keysym_t sym, uint32_t *code, bool *need_shift) 
 }
 
 static void kb_tap(uint32_t code, bool shift) {
-    // 注意：KEY_LEFTSHIFT 是 linux/input.h 里的宏（=42），不能拿来当变量名
+    // KEY_LEFTSHIFT is a macro in linux/input.h and cannot be used as a variable name.
     if (shift) kb_key(KEY_LEFTSHIFT, true);
     kb_key(code, true);
     kb_key(code, false);
@@ -439,14 +448,14 @@ static void mouse_click(int32_t x, int32_t y);
 
 static void kb_type_text(const char *s) {
     kb_xkb_init();
-    // 有 text-input 的客户端优先走 commit_string —— 这条能送任意 UTF-8（含中文），
-    // 而 keymap 注入要找 keycode，CJK 根本找不到。
+    // Clients with text input get commit_string, which carries arbitrary UTF-8, while
+    // keymap injection has no keycode for CJK characters.
     if (ti_commit_text(s)) { printf("[ime] commit_string: %s\n", s); return; }
     if (!g_xkb_keymap) return;
     const unsigned char *p = (const unsigned char *)s;
     while (*p) {
         uint32_t cp = 0;
-        // 解 UTF-8
+        // decode UTF-8
         if (*p < 0x80) { cp = *p++; }
         else if ((*p & 0xE0) == 0xC0 && p[1]) { cp = ((p[0] & 0x1F) << 6) | (p[1] & 0x3F); p += 2; }
         else if ((*p & 0xF0) == 0xE0 && p[1] && p[2]) {
@@ -464,7 +473,7 @@ static void kb_type_text(const char *s) {
         if (kb_find_keycode((xkb_keysym_t)cp, &code, &shift)) {
             kb_tap(code, shift);
         } else {
-            printf("[kbd] 这个字符敲不出来: U+%04X\n", cp);
+            printf("[kbd] cannot type U+%04X\n", cp);
         }
     }
 }
@@ -473,31 +482,31 @@ static void kb_send_symbol(const char *name) {
     kb_xkb_init();
     if (!g_xkb_keymap) return;
     xkb_keysym_t sym = xkb_keysym_from_name(name, XKB_KEYSYM_NO_FLAGS);
-    if (sym == XKB_KEY_NoSymbol) { printf("[kbd] 不认识的 keysym: %s\n", name); return; }
+    if (sym == XKB_KEY_NoSymbol) { printf("[kbd] unknown keysym %s\n", name); return; }
     uint32_t code = 0;
     bool shift = false;
     if (kb_find_keycode(sym, &code, &shift)) kb_tap(code, shift);
-    else printf("[kbd] keysym %s 没有对应 keycode\n", name);
+    else printf("[kbd] no keycode for keysym %s\n", name);
 }
 
-// 拉起/收起安卓软键盘：命令写 settings，由 LSPosed 模块里的悬浮窗服务 SfwmImeService 执行。
-// 为什么不由 sfwm 自己弹：输入法要求一个 Java View（ViewRootImpl + window token + InputConnection），
-// SurfaceComposer 图层没有这一层，IME 永远指不到它。
+// Raising and hiding the Android keyboard writes settings, which the input method
+// service runs. sfwm cannot raise it itself: an input method needs a Java view with a
+// window token and an InputConnection, which a SurfaceFlinger layer does not have.
 static void ime_kick_geometry();
 static void ime_send(bool show) {
     g_ime_on = show;
-    // 首选：往下发给已登记的长连接（相当于 Wayland 服务端发事件）
+    // Preferred: write to the registered connection, as a Wayland server sends events.
     if (g_ime_fd >= 0) {
         const char *msg = show ? "activate\n" : "deactivate\n";
         if (write(g_ime_fd, msg, strlen(msg)) >= 0) {
-            printf("[ime] %s（下发给 IME 客户端 fd=%d）\n", show ? "activate" : "deactivate", g_ime_fd);
+            printf("[ime] %s sent to the IME client, fd=%d\n", show ? "activate" : "deactivate", g_ime_fd);
             if (show) ime_kick_geometry();
             return;
         }
-        printf("[ime] 下发失败，客户端连接已断，回退到 settings 通道\n");
+        printf("[ime] delivery failed, client gone, falling back to settings\n");
         g_ime_fd = -1;
     }
-    // 回退：没有客户端连接时，照旧用 settings + am
+    // Fallback when no client is connected: settings and am.
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     long ms = (long)ts.tv_sec * 1000 + (long)(ts.tv_nsec / 1000000);
@@ -508,12 +517,12 @@ static void ime_send(bool show) {
              "settings put global sfwm_ime_seq %ld",
              show ? 1 : 2, ms);
     int rc = system(cmd);
-    printf("[ime] %s rc=%d seq=%ld（回退通道）\n", show ? "拉起" : "收起", rc, ms);
+    printf("[ime] %s rc=%d seq=%ld through the fallback\n", show ? "raise" : "hide", rc, ms);
     if (show) ime_kick_geometry();
 }
 
-// 键盘弹出后去捡一次窗口几何（IME 窗口的 mGivenContentInsets）算真实高度。
-// 这是目前唯一可靠的来源：insets 恒为 208，IMM 推荐高度恒为 0。
+// Read the window geometry once the keyboard is up to get the real height.
+// It is the only reliable source here: the insets are always 208 and the hinted
 static void ime_kick_geometry() {
     system("( sleep 1; dumpsys window windows 2>/dev/null "
            "| sed -n '/InputMethod}/,/Window #/p' "
@@ -523,12 +532,12 @@ static void ime_kick_geometry() {
 
 static void kb_command(const std::string &line, int fd) {
     if (line.empty()) return;
-    printf("[kbd] 命令: %s\n", line.c_str());
+    printf("[kbd] command: %s\n", line.c_str());
     const char *s = line.c_str();
     if (line == "ime-register") {
-        // IME 宿主登记为「常驻客户端」：这条连接保持住，以后由 sfwm 往它下发 activate/deactivate
+        // The IME host registers as a persistent client; activate and deactivate are written
         g_ime_fd = fd;
-        printf("[ime] IME 客户端已登记 fd=%d\n", fd);
+        printf("[ime] IME client registered, fd=%d\n", fd);
         return;
     }
     if (line.compare(0, 5, "imeh ") == 0) {
@@ -536,7 +545,7 @@ static void kb_command(const std::string &line, int fd) {
         if (h < 0) h = 0;
         g_ime_h = h;
         for (View *v : g_srv.views) if (v->mapped) v->place();
-        printf("[ime] 客户端上报高度 = %d\n", g_ime_h);
+        printf("[ime] client reported height %d\n", g_ime_h);
         return;
     }
     if (line.compare(0, 2, "t ") == 0) { kb_type_text(s + 2); }
@@ -551,27 +560,69 @@ static void kb_command(const std::string &line, int fd) {
     } else if (line.compare(0, 2, "c ") == 0) {
         int x = 0, y = 0, st = 1;
         int n = sscanf(s + 2, "%d %d %d", &x, &y, &st);
-        // c x y      = 完整点击（按下+抬起）
-        // c x y 0/1  = 只抬起/只按下
+        // c x y      a full click, press and release
+        // c x y 0/1  release or press only
         if (n >= 3) mouse_button(x, y, st != 0);
         else if (n == 2) mouse_click(x, y);
     } else if (line.compare(0, 2, "p ") == 0) {
         int x = 0, y = 0;
         if (sscanf(s + 2, "%d %d", &x, &y) == 2) mouse_click(x, y);
     } else if (line.compare(0, 4, "pre ") == 0) {
-        // 预编辑串（拼音未上屏），空内容用 "pre" 单独一行来清
+        // preedit string; a bare "pre" clears it
         ti_preedit_text(s + 4);
     } else if (line == "pre") {
         ti_preedit_text("");
     } else if (line == "snap") {
         g_snap_on = !g_snap_on;
-        printf("[wm] 吸附 = %s（阈值 %d dp）\n", g_snap_on ? "开" : "关", g_snap_band_dp);
+        printf("[wm] snap %s (threshold %d dp)\n", g_snap_on ? "on" : "off", g_snap_band_dp);
+    } else if (line.compare(0, 7, "bright ") == 0) {
+        // bright <0..100> writes /sys/class/backlight/*/brightness
+        disp_set_brightness_pct(atoi(s + 7));
+    } else if (line == "bright") {
+        disp_status();
+    } else if (line.compare(0, 4, "cct ") == 0) {
+        // cct <K> or cct off uses cmd display dwb-set-cct
+        std::string a = line.substr(4);
+        if (a == "off" || a == "0" || a == "native") disp_set_cct(-1);
+        else disp_set_cct(atoi(a.c_str()));
+    } else if (line.compare(0, 7, "screen ") == 0) {
+        std::string a = line.substr(7);
+        if (a == "off" || a == "0") disp_set_screen(false);
+        else if (a == "on" || a == "1") disp_set_screen(true);
+        else disp_status();
+    } else if (line.compare(0, 3, "ws ") == 0) {
+        // ws <1..4> switches workspace
+        ws_activate(atoi(s + 3) - 1);
+    } else if (line.compare(0, 5, "zoom ") == 0) {
+        // zoom <f> sets the composer-side zoom without a gesture
+        float f = (float)atof(s + 5);
+        if (f < 0.2f) f = 0.2f;
+        if (f > 3.0f) f = 3.0f;
+        View *v = g_srv.pointer_focus ? g_srv.pointer_focus : g_srv.kb_focus;
+        if (!v) { printf("[wm] zoom: no focused window\n"); return; }
+        v->set_zoom(f);   // uses the same path as a real gesture
+        printf("[wm] manual zoom=%.2f -> '%s' buf=%dx%d\n", f,
+               v->title[0] ? v->title : "view", v->bw, v->bh);
+    } else if (line == "zoom") {
+        View *v = g_srv.pointer_focus ? g_srv.pointer_focus : g_srv.kb_focus;
+        if (v) printf("[wm] '%s' zoom=%.2f buf=%dx%d pos=(%d,%d)\n",
+                      v->title[0] ? v->title : "view", v->zoom, v->bw, v->bh, v->x, v->y);
+    } else if (line == "ws") {
+        printf("[ws] %d workspaces, current %d, window assignment:\n", g_ws_count, g_ws_active + 1);
+        for (View *v : g_srv.views) {
+            if (!v || !v->mapped) continue;
+            printf("[ws]   ws=%d %s%s\n", v->ws + 1,
+                   v->title[0] ? v->title : (v->app_id[0] ? v->app_id : "view"),
+                   ws_visible(v) ? "" : "(hidden)");
+        }
+    } else if (line == "screen") {
+        disp_status();
     } else if (line.compare(0, 5, "snap ") == 0) {
         std::string arg = line.substr(5);
         if (arg == "on" || arg == "1" || arg == "true") g_snap_on = true;
         else if (arg == "off" || arg == "0" || arg == "false") g_snap_on = false;
         else { int n = atoi(arg.c_str()); if (n >= 0 && n <= 200) g_snap_band_dp = n; }
-        printf("[wm] 吸附 = %s（阈值 %d dp）\n", g_snap_on ? "开" : "关", g_snap_band_dp);
+        printf("[wm] snap %s (threshold %d dp)\n", g_snap_on ? "on" : "off", g_snap_band_dp);
     } else if (line == "dump") {
         printf("[dump] screen=%dx%d scale=%d gesture=%d owner=%d\n",
                g_out_w, g_out_h, g_scale, (int)g_in_gesture, touch_owner_value());
@@ -586,51 +637,51 @@ static void kb_command(const std::string &line, int fd) {
         printf("[dump] pointer=%d,%d focus=%p\n", g_srv.pointer_x, g_srv.pointer_y,
                (void *)g_srv.pointer_focus);
     } else if (line == "fit") {
-        // 一键救回：把最大的普通窗口夹进屏幕并居中（对话框按钮通常就在右下角）
+        // Recovery: clamp the largest ordinary window into the output and centre it.
         View *v = nullptr;
         for (View *o : g_srv.views) {
             if (!o->mapped || o->is_cursor || o->is_layer || o->is_subsurface) continue;
             if (!v || (int64_t)o->bw * o->bh > (int64_t)v->bw * v->bh) v = o;
         }
-        if (!v) { printf("[wm] fit: 没有窗口\n"); return; }
+        if (!v) { printf("[wm] fit: no window\n"); return; }
         const int32_t ox = v->x, oy = v->y;
         if (v->bw <= g_out_w) v->x = (g_out_w - v->bw) / 2;
         if (v->bh <= g_out_h) v->y = (g_out_h - v->bh) / 2;
         v->clamp_on_screen();
-        printf("[wm] fit '%s' (%d,%d)->(%d,%d) buf=%dx%d 屏幕=%dx%d\n",
+        printf("[wm] fit '%s' (%d,%d)->(%d,%d) buf=%dx%d output=%dx%d\n",
                v->title[0] ? v->title : "view", ox, oy, v->x, v->y, v->bw, v->bh, g_out_w, g_out_h);
     } else if (line == "max") {
-        // 让最上层的普通窗口铺满输出：关键是**发 configure 告诉客户端尺寸**，
-        // 光改 v->x/y 没用（buffer 还是客户端自己定的 1280x720）。
-        // 按“面积最大”选，而不是 z 最高 —— 否则会选中 64x64 的光标 surface。
+        // Maximise by sending a configure with the size; changing x and y alone leaves the
+        // client buffer at its own size.
+        // Choose the largest window, not the topmost one, which may be the 64x64 cursor.
         View *v = nullptr;
         for (View *o : g_srv.views) {
             if (!o->mapped || o->is_cursor || o->is_layer || o->is_subsurface) continue;
             if (!v || (int64_t)o->bw * o->bh > (int64_t)v->bw * v->bh) v = o;
         }
-        if (!v) { printf("[wm] max: 没有可最大化的窗口\n"); return; }
-        // ★ 必须用客户端的 buf_scale，不能用 g_scale。
-        //   g_scale 是 sfwm 自己的 UI 缩放（--scale=3），和客户端无关；
-        //   用它去除会把 1272x2800 的屏幕变成 424x933，窗口缩成一小块。
+        if (!v) { printf("[wm] max: no maximisable window\n"); return; }
+        // The client buf_scale is required here, not g_scale: g_scale is the compositor UI
+        // scale from --scale and has nothing to do with the client.
+        // Using it turns a 1272x2800 output into 424x933.
         const int32_t sc = client_scale(v);
         v->x = 0;
         v->y = 0;
         v->req_w = g_out_w / sc;
         v->req_h = g_out_h / sc;
-        // 只发尺寸不够：很多客户端（含 nested compositor）只在状态里有 MAXIMIZED 时才采纳。
+        // The size alone is not enough: many clients apply it only with MAXIMIZED in the state.
         v->want_maximized = true;
         toplevel_send_configure(v);
         v->place();
-        printf("[wm] max '%s' -> 请求 %dx%d 逻辑（屏幕 %dx%d，scale=%d）\n",
+        printf("[wm] max '%s' -> requesting %dx%d logical (output %dx%d, scale=%d)\n",
                v->title[0] ? v->title : "view", v->req_w, v->req_h, g_out_w, g_out_h, sc);
     } else if (line.rfind("zoom ", 0) == 0) {
-        // 调试：手动模拟「捏合中」的合成器侧缩放（不碰客户端）
+        // Debug: apply composer-side zoom without touching the client.
         View *v = nullptr;
         for (View *o : g_srv.views) {
             if (!o->mapped || o->is_cursor || o->is_layer || o->is_subsurface) continue;
             if (!v || (int64_t)o->bw * o->bh > (int64_t)v->bw * v->bh) v = o;
         }
-        if (!v) { printf("[wm] zoom: 没有窗口\n"); return; }
+        if (!v) { printf("[wm] zoom: no window\n"); return; }
         float z = (float)atof(line.c_str() + 5);
         if (z < 0.1f) z = 0.1f;
         if (z > 4.0f) z = 4.0f;
@@ -638,33 +689,33 @@ static void kb_command(const std::string &line, int fd) {
         v->x = cx - (int32_t)(v->bw * z) / 2;
         v->y = cy - (int32_t)(v->bh * z) / 2;
         v->set_zoom(z);
-        printf("[wm] zoom %.3f -> '%s' dst=%dx%d @ (%d,%d)，buffer 保持 %dx%d（没发 configure）\n",
+        printf("[wm] zoom %.3f -> '%s' dst=%dx%d at (%d,%d), buffer stays %dx%d, no configure sent\n",
                z, v->title[0] ? v->title : "view",
                (int)(v->bw * z), (int)(v->bh * z), v->x, v->y, v->bw, v->bh);
     } else if (line == "zoomend") {
-        // 调试：模拟「松手」——发一次 configure 落实尺寸
+        // Debug: simulate the release by sending one configure.
         View *v = nullptr;
         for (View *o : g_srv.views) {
             if (!o->mapped || o->is_cursor || o->is_layer || o->is_subsurface) continue;
             if (!v || (int64_t)o->bw * o->bh > (int64_t)v->bw * v->bh) v = o;
         }
-        if (!v) { printf("[wm] zoomend: 没有窗口\n"); return; }
+        if (!v) { printf("[wm] zoomend: no window\n"); return; }
         const int32_t sc0 = client_scale(v);
         v->req_w = (int32_t)(v->bw * v->zoom) / sc0;
         v->req_h = (int32_t)(v->bh * v->zoom) / sc0;
         if (v->req_w < 120) v->req_w = 120;
         if (v->req_h < 120) v->req_h = 120;
         toplevel_send_configure(v);
-        printf("[wm] zoomend zoom=%.3f -> 请求 %dx%d 逻辑（buffer %dx%d）\n",
+        printf("[wm] zoomend zoom=%.3f -> requesting %dx%d logical (buffer %dx%d)\n",
                v->zoom, v->req_w, v->req_h, v->bw, v->bh);
     } else if (line == "ct") {
-        // 点击穿透开关：开了之后我们的图层不再抢触摸，安卓界面完全可点
+        // Click-through: our layers stop taking touches and the Android UI is reachable.
         g_clickthrough = !g_clickthrough;
         if (g_clickthrough) { g_in.resizing = false; g_in.resize_view = nullptr; g_in.dragging = false; g_in.drag_view = nullptr; g_in.down = false; g_in.pending = 0; }
         for (View *v : g_srv.views) if (v->mapped) v->place();
-        printf("[wm] 点击穿透 = %s\n", g_clickthrough ? "开" : "关");
+        printf("[wm] click-through %s\n", g_clickthrough ? "on" : "off");
     } else if (line.compare(0, 3, "ct ") == 0) {
-        // 注意 "on"/"off" 首字母都是 'o'，必须整词比较
+        // "on" and "off" share their first letter, so compare whole words.
         std::string arg = line.substr(3);
         bool val = g_clickthrough;
         if (arg == "on" || arg == "1" || arg == "true" || arg == "yes") val = true;
@@ -673,7 +724,7 @@ static void kb_command(const std::string &line, int fd) {
         g_clickthrough = val;
         if (g_clickthrough) { g_in.resizing = false; g_in.resize_view = nullptr; g_in.dragging = false; g_in.drag_view = nullptr; g_in.down = false; g_in.pending = 0; }
         for (View *v : g_srv.views) if (v->mapped) v->place();
-        printf("[wm] 点击穿透 = %s\n", g_clickthrough ? "开" : "关");
+        printf("[wm] click-through %s\n", g_clickthrough ? "on" : "off");
     } else if (line == "ime") {
         ime_send(!g_ime_on);
     } else if (line.compare(0, 4, "ime ") == 0) {
@@ -686,28 +737,28 @@ static void kb_command(const std::string &line, int fd) {
         if (h < 0) h = 0;
         g_ime_h = h;
         for (View *v : g_srv.views) if (v->mapped) v->place();
-        printf("[ime] 高度 = %d\n", g_ime_h);
+        printf("[ime] height %d\n", g_ime_h);
     } else if (line.compare(0, 9, "imestate ") == 0) {
         int st = atoi(s + 9);
         g_ime_on = st != 0;
         if (!g_ime_on) {
             g_ime_h = 0;
-            ti_force_disable();     // 键盘被系统收掉 -> 让客户端同步退出输入法焦点
+            ti_force_disable();     // keyboard hidden by the system: clients leave text input focus
         }
         for (View *v : g_srv.views) if (v->mapped) v->place();
-        printf("[ime] 状态 = %s (h=%d)\n", g_ime_on ? "显示" : "隐藏", g_ime_h);
+        printf("[ime] state %s (h=%d)\n", g_ime_on ? "shown" : "hidden", g_ime_h);
     } else if (line == "hide") {
-        // 把合成器输出藏起来（让出屏幕给安卓界面），但进程继续跑、继续收注入
+        // Hide the output and give the screen back to Android; the process keeps running.
         for (View *v : g_srv.views) if (v->layer.win) v->layer.hide();
-        printf("[sfwm] 图层已隐藏\n");
+        printf("[sfwm] layers hidden\n");
     } else if (line == "show") {
         for (View *v : g_srv.views) if (v->mapped) v->place();
-        printf("[sfwm] 图层已恢复\n");
+        printf("[sfwm] layers restored\n");
     }
     else if (line == "help") {
-        printf("[kbd] 用法: t <文本> | k <evdev码> <0|1> | s <keysym名> | m <x> <y> | c <x> <y> <0|1> | p <x> <y>\n");
+        printf("[kbd] usage: t <text> | k <evdev> <0|1> | s <keysym> | m <x> <y> | c <x> <y> <0|1> | p <x> <y>\n");
     } else {
-        kb_type_text(s);   // 裸行 = 直接打字
+        kb_type_text(s);   // a bare line types text
     }
 }
 

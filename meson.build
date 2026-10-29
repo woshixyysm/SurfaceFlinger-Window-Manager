@@ -1,11 +1,11 @@
-# sfwm —— 把 SurfaceFlinger 当合成器用的 Wayland compositor
+# sfwm - a Wayland compositor that uses SurfaceFlinger as its compositor
 #
-# 构建上必须照抄旧 build.sh 的四条约定（都是踩出来的）：
-#   1. 用 clang++，**不能**用默认的 c++（那是 GCC 17 / libstdc++）；
-#   2. 只用 pkg-config 的库，不用它的 cflags —— 否则 -I$PREFIX/include
-#      会把另一份 sys/cdefs.h 顶到 bionic 前面；
-#   3. 协议生成的 .c 必须按 C 直接编进可执行文件（C++ 里 wl_interface 会变内部链接）；
-#   4. cpp_std=c++17（严格），源码里有乱序 designated initializer。
+# Four build rules are required here:
+#   1. use clang++; the default c++ is GCC 17 with libstdc++
+#   2. take only the libraries from pkg-config, never its cflags, or
+#      -I$PREFIX/include shadows the bionic sys/cdefs.h
+#   3. compile the generated protocol .c files as C into the executable, since in
+#   4. cpp_std=c++17 is required, the source uses out of order designated initialisers
 project('sfwm', ['c', 'cpp'],
   default_options: ['cpp_std=c++17', 'buildtype=release', 'warning_level=0'])
 
@@ -22,8 +22,8 @@ add_project_arguments(
 libdir  = join_paths(prefix, 'lib')
 gccdir  = join_paths(prefix, 'opt/gcc-17/lib/gcc/aarch64-linux-android/17.0.0')
 
-# 模块之间写 #include "core/config.hpp" 这种相对 src/ 的路径 →
-# 单引号 include 会先找“包含者所在目录”，所以必须在 -I 里提供 src 根。
+# Modules include each other with paths relative to src/, such as "core/config.hpp".
+# Such an include searches the including file's directory first, so src is on -I.
 inc = include_directories('src')
 ld_extra = [
   '-L' + libdir, '-L' + gccdir,
@@ -31,15 +31,15 @@ ld_extra = [
   '-static-libgcc', '-Wl,-rpath,' + libdir,
 ]
 
-# xdg-shell 等系统协议在 share/wayland-protocols 下；三个私有协议在 protocols/
+# System protocols come from share/wayland-protocols, local ones from protocols/
 proto_entries = [
   ['stable/xdg-shell/xdg-shell.xml', 'xdg-shell', '', true],
   ['stable/linux-dmabuf/linux-dmabuf-v1.xml', 'linux-dmabuf-v1', '', true],
   ['protocols/wayland-drm.xml', 'wayland-drm', '', false],
   ['protocols/wlr-layer-shell-unstable-v1.xml', 'wlr-layer-shell-unstable-v1', 'ns', false],
   ['protocols/wlr-screencopy-unstable-v1.xml', 'wlr-screencopy-unstable-v1', '', false],
-  # 这两个 wayland-protocols 1.49 里没有（input-method 只有 v1，virtual-keyboard 压根没有），
-  # 从 wlroots 的 protocol/ 目录 vendor 过来（wayland-scanner 校验通过）。
+  # Both are absent from wayland-protocols 1.49: input-method only exists as v1 and
+  # virtual-keyboard does not exist, so they are vendored from wlroots.
   ['protocols/input-method-unstable-v2.xml', 'input-method-unstable-v2', '', false],
   ['protocols/virtual-keyboard-unstable-v1.xml', 'virtual-keyboard-unstable-v1', '', false],
   ['stable/viewporter/viewporter.xml', 'viewporter', '', true],
@@ -65,6 +65,23 @@ proto_entries = [
   ['unstable/primary-selection/primary-selection-unstable-v1.xml', 'primary-selection-unstable-v1', '', true],
   ['staging/xwayland-shell/xwayland-shell-v1.xml', 'xwayland-shell-v1', '', true],
   ['unstable/tablet/tablet-unstable-v2.xml', 'tablet-unstable-v2', '', true],
+  ['staging/ext-foreign-toplevel-list/ext-foreign-toplevel-list-v1.xml', 'ext-foreign-toplevel-list-v1', '', true],
+  ['staging/ext-idle-notify/ext-idle-notify-v1.xml', 'ext-idle-notify-v1', '', true],
+  ['staging/xdg-toplevel-icon/xdg-toplevel-icon-v1.xml', 'xdg-toplevel-icon-v1', '', true],
+  ['protocols/wlr-output-power-management-unstable-v1.xml', 'wlr-output-power-management-unstable-v1', 'ns', false],
+  ['protocols/wlr-gamma-control-unstable-v1.xml', 'wlr-gamma-control-unstable-v1', 'ns', false],
+  # Frame timing, sandbox identity, virtual pointer, clipboard managers, toplevel lists
+  ['staging/commit-timing/commit-timing-v1.xml', 'commit-timing-v1', '', true],
+  ['staging/security-context/security-context-v1.xml', 'security-context-v1', '', true],
+  ['staging/ext-data-control/ext-data-control-v1.xml', 'ext-data-control-v1', '', true],
+  ['protocols/wlr-virtual-pointer-unstable-v1.xml', 'wlr-virtual-pointer-unstable-v1', 'ns', false],
+  ['protocols/wlr-data-control-unstable-v1.xml', 'wlr-data-control-unstable-v1', 'ns', false],
+  ['protocols/wlr-foreign-toplevel-management-unstable-v1.xml', 'wlr-foreign-toplevel-management-unstable-v1', 'ns', false],
+  # Workspaces, session lock and capture
+  ['staging/ext-workspace/ext-workspace-v1.xml', 'ext-workspace-v1', '', true],
+  ['staging/ext-session-lock/ext-session-lock-v1.xml', 'ext-session-lock-v1', '', true],
+  ['staging/ext-image-capture-source/ext-image-capture-source-v1.xml', 'ext-image-capture-source-v1', '', true],
+  ['staging/ext-image-copy-capture/ext-image-copy-capture-v1.xml', 'ext-image-copy-capture-v1', '', true],
 ]
 
 gen_script = join_paths(meson.current_source_dir(), 'build-aux/gen-proto.sh')
@@ -78,11 +95,11 @@ foreach p : proto_entries
   proto_c += gens[1]
 endforeach
 
-# 单 TU：src/sfwm.cpp 只是一串 include（顺序 = 代码原本的顺序）+ main。
-# 所以不要把这堆模块编成多个 .cpp —— 它们目前共享 static 全局，
-# 拆到多个 TU 需要先把全局改成 extern（那是下一步的事）。
+# Single translation unit: src/main.cpp is a list of includes in the original order,
+# plus main(). The modules share static globals, so do not split them into separate
+# .cpp files before turning those globals into extern declarations.
 executable('sfwm',
-  'src/sfwm.cpp',
+  'src/main.cpp',
   proto_c,
   include_directories: inc,
   link_args: ld_extra,

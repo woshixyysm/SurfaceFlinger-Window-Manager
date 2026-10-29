@@ -1,8 +1,9 @@
 name: ci
 
-# 这个项目真正的编译只能在 Termux / Android 上做（要 bionic、libandroid、SurfaceFlinger
-# 的 Binder ABI），GitHub 的 Linux runner 编不了。所以 CI 只做“不需要 Android 环境
-# 也能证明”的那部分：结构不变式 + 协议生成 + 拆分无损。
+# The project only builds on Termux or Android, since it needs bionic, libandroid and the
+# SurfaceFlinger Binder ABI, so the Linux runners cannot compile it. CI therefore covers
+# what can be proven without an Android environment: structural invariants, protocol
+# generation, and a cross build against the Termux headers bundled in deps/.
 
 on:
   push:
@@ -16,37 +17,37 @@ concurrency:
 
 jobs:
   structure:
-    name: 结构与协议生成
+    name: structure and protocol generation
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: 安装 wayland-scanner 与 wayland-protocols
+      - name: install wayland-scanner and wayland-protocols
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq libwayland-bin wayland-protocols
           command -v wayland-scanner
           ls /usr/share/wayland-protocols/stable | head -3
 
-      - name: 结构检查 + 逐个生成 28 个协议
+      - name: structure check and protocol generation
         run: python3 tools/check_structure.py --protogen --show-order
 
   cross:
-    name: 交叉编译（自定义 NDK + Termux 头/库）
+    name: cross build with a custom NDK and the Termux headers
     runs-on: ubuntu-latest
-    # ⚠️ 首轮试跑：本机（Windows/Termux）无法复现 GitHub runner 上的下载/解包路径，
-    #    所以先让失败不卡住仓库。第一次绿了以后把下面这行删掉，它就成了真闸门。
+    # First run only: the download and unpack paths of the runner cannot be reproduced
+    # locally, so a failure here must not block the repository.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
-      - name: 缓存 NDK
+      - name: cache the NDK
         uses: actions/cache@v4
         with:
           path: ~/ndk-cache
           key: ndk-custom-r30-x86_64-linux-gnu
 
-      - name: 取 NDK（android-ndk-custom r30，宿主 x86_64-linux-gnu）
+      - name: fetch the NDK (android-ndk-custom r30, x86_64-linux-gnu host)
         run: |
           set -euo pipefail
           if [ ! -d "$HOME/ndk-cache/ndk" ]; then
@@ -55,19 +56,18 @@ jobs:
               https://github.com/HomuHomu833/android-ndk-custom/releases/download/r30/android-ndk-r30-x86_64-linux-gnu.tar.xz
             mkdir -p /tmp/ndk-extract
             tar -xJf /tmp/ndk.tar.xz -C /tmp/ndk-extract
-            # 解出来可能还套一层目录，取唯一那个
             inner=$(find /tmp/ndk-extract -maxdepth 1 -mindepth 1 -type d | head -1)
             mv "$inner" "$HOME/ndk-cache/ndk"
           fi
           ls "$HOME/ndk-cache/ndk"
           echo "NDK=$HOME/ndk-cache/ndk" >> "$GITHUB_ENV"
 
-      - name: 安装 wayland-scanner / wayland-protocols
+      - name: install wayland-scanner, wayland-protocols and xz
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq libwayland-bin wayland-protocols xz-utils
 
-      - name: 解出 Termux 依赖（仓库内置，就是设备上在跑的那份）
+      - name: unpack the Termux dependencies bundled with the repository
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/deps"
@@ -75,22 +75,8 @@ jobs:
           ls -l "$RUNNER_TEMP/deps/include/wayland-server-core.h" \
                 "$RUNNER_TEMP/deps/lib/libwayland-server.so"
 
-      - name: 交叉编译
+      - name: cross build
         run: |
           NDK="$NDK" DEPS="$RUNNER_TEMP/deps" OUT="$RUNNER_TEMP/out" \
             sh build-aux/ci-cross-build.sh
           ls -l "$RUNNER_TEMP/out/sfwm"
-
-  lossless:
-    name: 拆分无损（对拆分前单文件逐行比对）
-    # 只在手动触发时跑：模块一旦有意修改（修 bug / 加功能），这项就该“失败”，
-    # 它不是长期约束，只是一次可复现的证据。
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0        # 要 git show 389c0f6:src/sfwm.cpp
-
-      - name: 把 24 个模块拼回去，与 4958 行原件逐行比对
-        run: python3 tools/verify_split.py

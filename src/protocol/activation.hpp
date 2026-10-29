@@ -1,14 +1,15 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // activation.hpp
 //
 // xdg_activation_v1
 //
-// 从 sfwm.cpp 原样搬出（只搬不改，逻辑零差异）。
-// 依赖包含顺序：本文件用到的东西必须由**前面的**模块提供，
-// 因此它在 sfwm.cpp 里的 include 位置就是它原来在文件里的位置。
+// Extracted from the former single-file implementation; behaviour is unchanged.
+// Depends on include order: everything used here is provided by the modules
+// included before it in src/main.cpp.
 #pragma once
 
 // ---------------------------------------------------------------- xdg_activation_v1
-// 应用启动时用它抢焦点（没有这个，点启动器起来的窗口经常不聚焦）。
+// Applications take focus through it when launched from a launcher.
 static void act_token_destroy(wl_client *, wl_resource *r) { wl_resource_destroy(r); }
 static void act_token_set_serial(wl_client *, wl_resource *, uint32_t, wl_resource *) {}
 static void act_token_set_app_id(wl_client *, wl_resource *, const char *) {}
@@ -41,7 +42,7 @@ static void act_activate(wl_client *, wl_resource *, const char *token, wl_resou
     v->z = top + 1;
     v->place();
     kb_set_focus(v);
-    printf("[activation] 激活 '%s'\n", v->title[0] ? v->title : "view");
+    printf("[activation] activate '%s'\n", v->title[0] ? v->title : "view");
 }
 
 static void act_get_token(wl_client *c, wl_resource *res, uint32_t id) {

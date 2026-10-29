@@ -1,27 +1,29 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // prelude.hpp
 //
-// 标准头 + 协议头 + wl_shm 的 fd 帮手
+// Standard headers, protocol headers and the wl_shm fd helper.
 //
-// 从 sfwm.cpp 原样搬出（只搬不改，逻辑零差异）。
-// 依赖包含顺序：本文件用到的东西必须由**前面的**模块提供，
-// 因此它在 sfwm.cpp 里的 include 位置就是它原来在文件里的位置。
+// Extracted from the former single-file implementation; behaviour is unchanged.
+// Depends on include order: everything used here is provided by the modules
+// included before it in src/main.cpp.
 #pragma once
 
-// sfwm.cpp —— 把 SurfaceFlinger 当窗口管理器的 Wayland compositor
+// sfwm - a Wayland compositor that uses SurfaceFlinger as its window manager.
 //
-// 设计：不自已合成像素。每个 xdg_toplevel 对应一个独立的 SurfaceFlinger 图层，
-//       position / z-order / 显隐 全部通过 SurfaceComposerClient::Transaction 下发给 SF，
-//       由 SF 的硬件合成器完成混叠。我们只负责 wl_shm 像素搬运 + 窗口策略。
+// sfwm never composites pixels itself. Every xdg_toplevel owns a SurfaceFlinger layer,
+// and position, z-order and visibility are applied through SurfaceComposerClient
+// transactions, so SurfaceFlinger's hardware composer does the blending. What remains
+// is the wl_shm pixel copy and the window policy.
 //
-// 构建：见 build.sh（需要 wayland-scanner 生成 xdg-shell 协议代码）
+// Build instructions are in README.md; wayland-scanner generates the protocol code.
 
-#include "sf_layer.hpp"
+#include "compositor/sf_layer.hpp"
 
-// wayland 的协议头没有 extern "C" 保护，而生成的 .c 是按 C 编的，
-// 这里必须显式包一层，否则 xdg_wm_base_interface 之类会变成 C++ 修饰名 → 链接失败。
+// The wayland protocol headers have no extern "C" guard, while the generated .c files
+// are compiled as C, so this block is required or the interface symbols are mangled.
 extern "C" {
 #include <wayland-server-core.h>
-#include "sc_screencopy.hpp"
+#include "protocol/screencopy.hpp"
 #include <wayland-server-protocol.h>
 #include "xdg-shell-server-protocol.h"
 #include "linux-dmabuf-v1-server-protocol.h"
@@ -80,17 +82,12 @@ extern "C" {
 #include <vector>
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 给客户端传 fd 时**不能**用 memfd_create。
-//   memfd 是匿名 shmem，安全标签继承「创建者的域」—— sfwm 是 root（u:r:ksu:s0，
-//   无 MLS 类别）；而 Termux 应用进程是 u:r:runas_app:s0:c512,c768。
-//   跨 MLS 类别接收 fd 会被 security_file_receive 拒绝，Android 上这条规则是
-//   dontaudit，所以 dmesg 里看不到任何 avc —— 表现只是客户端少了个 fd：
-//       XWAYLAND: file descriptor expected, object (22), message keymap(uhu)
-//       (EE) failed to read Wayland events: Invalid argument   → Xwayland 直接退出
-//       eglInitialize failed                                   → OBS 视频初始化失败
-//   ⇒ 改成在 XDG_RUNTIME_DIR（Termux 数据目录）里建普通文件：标签是
-//     u:object_r:app_data_file:s0:c512,c768，与 runas_app 类别一致 → 传输放行。
-//   这样 Xwayland / OBS / java 全都能留在 runas_app 域，不需要塞进 ksu。
+// Fds handed to clients must not come from memfd_create. A memfd inherits the SELinux
+// label of its creator, and sfwm runs as root while clients run as applications; an fd
+// crossing MLS categories is denied by security_file_receive, and the rule is dontaudit,
+// so nothing appears in dmesg. The client just loses the fd, which breaks Xwayland, OBS
+// and EGL initialisation. A regular file in XDG_RUNTIME_DIR carries a label in the
+// client's own category, so the transfer is allowed.
 // ─────────────────────────────────────────────────────────────────────────────
 static int sfwm_rt_file(const char *name, size_t size) {
     const char *rt = getenv("XDG_RUNTIME_DIR");
@@ -102,18 +99,18 @@ static int sfwm_rt_file(const char *name, size_t size) {
     snprintf(p, n, "%s/%s-%d-%d", rt, name, (int)getpid(), ++seq);
     int fd = open(p, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (fd < 0) {
-        fprintf(stderr, "[sf] 建 %s 失败: %s\n", p, strerror(errno));
+        fprintf(stderr, "[sf] cannot create %s: %s\n", p, strerror(errno));
         free(p);
         return -1;
     }
     if (size > 0 && ftruncate(fd, (off_t)size) < 0) {
-        fprintf(stderr, "[sf] ftruncate %s 失败: %s\n", p, strerror(errno));
+        fprintf(stderr, "[sf] ftruncate %s failed: %s\n", p, strerror(errno));
         close(fd);
         free(p);
         return -1;
     }
     chmod(p, 0644);
-    // 立刻 unlink：fd 仍然有效，内容随最后一个引用消失，不占目录
+    // Unlink immediately: the fd stays valid and the file goes away with the last one.
     unlink(p);
     free(p);
     return fd;

@@ -1,20 +1,18 @@
 #!/system/bin/sh
-# quiesce.sh —— 让指定包「能手动用、但不会自己活过来」
+# quiesce.sh - keep the listed packages usable by hand but stop them starting themselves
 #
-#   sh quiesce.sh                  # 默认清单
-#   sh quiesce.sh com.foo.bar ...
-#   sh quiesce.sh --undo           # 把清单恢复成正常
+#   sh quiesce.sh                  default list
+#   sh quiesce.sh --undo           restore the list
 #
-# 手段（都可逆，不 disable 包）：
-#   1. am set-standby-bucket restricted      -> 归入罕见使用桶
-#   2. appops RUN_ANY_IN_BACKGROUND ignore   -> 禁止后台拉起（含 push 服务自启）
-#   3. am force-stop                          -> 立刻清掉现有进程
+# Three reversible steps are applied and no package is disabled:
+#   1. am set-standby-bucket restricted     move to the rare bucket
+#   2. appops RUN_ANY_IN_BACKGROUND ignore  block background starts, including push
+#   3. am force-stop                        clear the running processes
 #
-# 不放进清单的东西（会破坏功能）：
-#   com.touchtype.swiftkey  sfwm 的注入 socket 在它目录里，杀了打不了字
-#   com.android.systemui    状态栏/通知
-#   surfaceflinger / system 别碰
-
+# Never add these:
+#   com.touchtype.swiftkey  the sfwm injection socket lives in its directory
+#   com.android.systemui    status bar and notifications
+#   surfaceflinger, system  leave them alone
 DEFAULT="com.tencent.mm com.tencent.mobileqq com.oplus.aiunit"
 LIST=$DEFAULT
 UNDO=0
@@ -25,17 +23,17 @@ case "$1" in
 esac
 
 mem() { awk '/MemAvailable/{printf "%.0f MB", $2/1024}' /proc/meminfo; }
-cmdok() { "$@" >/dev/null 2>&1 || echo "    (失败: $*)"; }
+cmdok() { "$@" >/dev/null 2>&1 || echo "    (failed: $*)"; }
 
-echo "=== 当前 $(mem) 可用 ==="
+echo "=== currently $(mem) available ==="
 for p in $LIST; do
     if [ "$UNDO" = "1" ]; then
-        echo "-- 恢复 $p"
+        echo "-- restore $p"
         cmdok am set-standby-bucket "$p" active
         cmdok cmd appops set "$p" RUN_ANY_IN_BACKGROUND allow
         cmdok cmd appops set "$p" RUN_IN_BACKGROUND allow
     else
-        echo "-- 挂起 $p"
+        echo "-- quiesce $p"
         cmdok am set-standby-bucket "$p" restricted
         cmdok cmd appops set "$p" RUN_ANY_IN_BACKGROUND ignore
         cmdok cmd appops set "$p" RUN_IN_BACKGROUND ignore
@@ -46,8 +44,8 @@ done
 sleep 4
 echo
 echo "=== 之后 $(mem) 可用 ==="
-for p in $LIST; do printf '  %-28s %s\n' "$p" "$(pidof $p || echo 未运行)"; done
-printf '  %-28s %s\n' sfwm "$(pidof sfwm || echo 不在了！)"
+for p in $LIST; do printf '  %-28s %s\n' "$p" "$(pidof $p || echo not running)"; done
+printf '  %-28s %s\n' sfwm "$(pidof sfwm || echo not running)"
 echo
-echo "--- 最吃内存的 8 个 ---"
+echo "--- eight largest consumers ---"
 dumpsys meminfo 2>/dev/null | sed -n '/Total PSS by process/,/Total PSS by OOM/p' | head -11

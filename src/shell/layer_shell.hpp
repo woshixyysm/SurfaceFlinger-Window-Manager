@@ -1,16 +1,17 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // layer_shell.hpp
 //
-// zwlr_layer_shell_v1（面板/托盘）
+// zwlr_layer_shell_v1, used by panels and trays.
 //
-// 从 sfwm.cpp 原样搬出（只搬不改，逻辑零差异）。
-// 依赖包含顺序：本文件用到的东西必须由**前面的**模块提供，
-// 因此它在 sfwm.cpp 里的 include 位置就是它原来在文件里的位置。
+// Extracted from the former single-file implementation; behaviour is unchanged.
+// Depends on include order: everything used here is provided by the modules
+// included before it in src/main.cpp.
 #pragma once
 
 // ---------------------------------------------------------------- zwlr_layer_shell_v1
-// 面板 / 托盘 / 启动器（quickshell、waybar、fuzzel、swaybg、mako）全靠它。
-// 我们不做真正的「层」，只把 anchor + margin 算成屏幕坐标，然后当普通 View 上屏；
-// 层序靠 z 分档：background < 普通窗口 < top < overlay。
+// Panels, trays and launchers depend on it. There are no real layers here: anchor and
+// margin become screen coordinates and the surface becomes an ordinary view, ordered by z
+// from background through normal windows to top and overlay.
 
 static int32_t layer_z_for(uint32_t layer) {
     switch (layer) {
@@ -22,7 +23,7 @@ static int32_t layer_z_for(uint32_t layer) {
     }
 }
 
-// 按 anchor/margin 算位置。尺寸优先用已到手的 buffer，其次用客户端请求值。
+// Position from anchor and margin, preferring the buffer size over the request.
 static void layer_apply_anchor(View *v) {
     if (!v || !v->is_layer) return;
     g_reason = "layer";
@@ -115,7 +116,7 @@ static void lsurf_set_keyboard_interactivity(wl_client *, wl_resource *r, uint32
         kb_set_focus(v);
 }
 
-// 层表面的 popup（下拉菜单）：目前不实现真正的 grab，客户端会自己兜底
+// Popups of layer surfaces: no grab is implemented, clients handle it themselves.
 static void lsurf_get_popup(wl_client *, wl_resource *, wl_resource *) {}
 
 static void lsurf_ack_configure(wl_client *, wl_resource *, uint32_t) {}

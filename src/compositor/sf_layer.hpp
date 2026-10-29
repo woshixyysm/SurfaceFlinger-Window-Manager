@@ -1,6 +1,7 @@
-// sf_layer.hpp —— SurfaceFlinger 图层的最小封装（Android 16 实测 ABI）
-// 依赖：/system/lib64/libgui.so, /system/lib64/libutils.so
-// 关键点见 libgui/README.md：sp<T> 走 X8 sret；ANativeWindow 在 Surface+0x10
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// sf_layer.hpp - minimal SurfaceFlinger layer wrapper (ABI as measured on Android 16).
+// Depends on /system/lib64/libgui.so and /system/lib64/libutils.so.
+// sp<T> returns travel in X8 (sret); the ANativeWindow lives at Surface+0x10.
 #pragma once
 
 #include <android/native_window.h>
@@ -14,12 +15,12 @@ namespace sf {
 
 struct Rect { int32_t left, top, right, bottom; };
 
-// >16 字节的聚合体 → clang 才会用 X8 传 sret
+// Aggregates larger than 16 bytes make clang return through X8 (sret).
 struct Sret24 { void *a, *b, *c; };
 
 typedef Sret24 (*Fn_getDefault)(void);
 typedef Sret24 (*Fn_getSurface)(void *sc);
-typedef void   (*Fn_createSurfaceChecked)(void);   // 只用地址，走手写 asm 调用
+typedef void   (*Fn_createSurfaceChecked)(void);   // address only, called through a handwritten asm bridge
 typedef void (*Fn_String8_ctor)(void *out, const char *s);
 typedef void (*Fn_String8_dtor)(void *p);
 typedef void (*Fn_LayerMetadata_ctor)(void *p);
@@ -31,22 +32,22 @@ typedef void (*Fn_Tx_setAlpha)(void *tx, const void *sp_sc, float a);
 typedef void (*Fn_Tx_show)(void *tx, const void *sp_sc);
 typedef void (*Fn_Tx_hide)(void *tx, const void *sp_sc);
 typedef void (*Fn_Tx_reparent)(void *tx, const void *sp_sc, const void *sp_parent);
-typedef void (*Fn_Tx_setFlags)(void *tx, const void *sp_sc, uint32_t flags, uint32_t mask);    // Android 12+ 的输入遮挡：图层即使 touchableRegion 为空，只要 touchOcclusionMode
-    // 是 BLOCK_UNTRUSTED 且像素不透明度够高，就会把下面「不受信任」窗口的触摸吞掉。
-    // 光标这种纯装饰覆盖层必须显式声明：受信任覆盖层 + 丢弃所有输入。
+typedef void (*Fn_Tx_setFlags)(void *tx, const void *sp_sc, uint32_t flags, uint32_t mask);    // Android 12+ input occlusion: an empty touchableRegion does not stop a layer with
+    // touchOcclusionMode BLOCK_UNTRUSTED and opaque pixels from swallowing touches that
+    // target untrusted windows below. Decorative overlays must be trusted and drop input.
     typedef void (*Fn_Tx_setTrustedOverlay)(void *tx, const void *sp_sc, int trusted);
     typedef void (*Fn_Tx_setDropInputMode)(void *tx, const void *sp_sc, int mode);
     typedef int32_t (*Fn_Tx_apply)(void *tx, bool sync, bool oneWay);
 
-// layer_state_t 的关键位（frameworks/native/include/gui/LayerState.h）
+// Selected bits of layer_state_t (frameworks/native/include/gui/LayerState.h).
 static constexpr uint32_t SF_LAYER_HIDDEN        = 0x01;
 static constexpr uint32_t SF_LAYER_OPAQUE        = 0x02;
 static constexpr uint32_t SF_LAYER_NOT_FOCUSABLE = 0x08;
 static constexpr uint32_t SF_LAYER_NOT_TOUCHABLE = 0x10;
 
-// ---- ABI 桥 ----
-// getDefault() 返回 sp<SurfaceComposerClient>，是"非平凡返回值" → 走 X8 (sret)。
-// 直接用 C 函数指针按 x0 传会写到野指针上，必须用 naked 桥把 x8 指过去。
+// ---- ABI bridges ----
+// getDefault() returns sp<SurfaceComposerClient>, a non-trivial value passed in X8.
+// A plain C function pointer would write the result through a wild pointer, so a naked
 __attribute__((naked, noinline))
 static void get_default_bridge(void *, void *) {
     asm volatile(
@@ -57,7 +58,7 @@ static void get_default_bridge(void *, void *) {
         "ret\n");
 }
 
-// getSurface() 同理，sp<Surface> 也是 X8 返回
+// getSurface() likewise returns sp<Surface> through X8.
 __attribute__((naked, noinline))
 static void get_surface_bridge(void *, void *, void *) {
     asm volatile(
@@ -68,7 +69,7 @@ static void get_surface_bridge(void *, void *, void *) {
         "ret\n");
 }
 
-// createSurfaceChecked 的 9 个参数：x1..x7 + 栈上 [sp]=&metadata, [sp+8]=outTransformHint
+// createSurfaceChecked takes nine arguments: x1..x7, plus [sp] = &metadata and [sp+8] = outTransformHint.
 static inline int32_t call_create_surface_checked(
     void *fn, void *client, const void *name8,
     uint32_t w, uint32_t h, int32_t format,
@@ -130,7 +131,7 @@ struct Lib {
 
     static void *sym(void *h, const char *n, bool required) {
         void *p = dlsym(h, n);
-        if (!p && required) { fprintf(stderr, "[sf] 缺符号 %s\n", n); abort(); }
+        if (!p && required) { fprintf(stderr, "[sf] missing symbol %s\n", n); abort(); }
         return p;
     }
 
@@ -156,37 +157,37 @@ struct Lib {
         tx_show        = (Fn_Tx_show)       sym(libgui, "_ZN7android21SurfaceComposerClient11Transaction4showERKNS_2spINS_14SurfaceControlEEE", true);
         tx_hide        = (Fn_Tx_hide)       sym(libgui, "_ZN7android21SurfaceComposerClient11Transaction4hideERKNS_2spINS_14SurfaceControlEEE", true);
         tx_reparent    = (Fn_Tx_reparent)   sym(libgui, "_ZN7android21SurfaceComposerClient11Transaction8reparentERKNS_2spINS_14SurfaceControlEEES6_", false);
-        // surfaceflinger 的“点击穿透”开关：eLayerNotTouchable（不导出头文件，但符号在）
+        // Click-through flag: eLayerNotTouchable, not in any public header but exported.
         tx_setFlags    = (Fn_Tx_setFlags)   sym(libgui, "_ZN7android21SurfaceComposerClient11Transaction8setFlagsERKNS_2spINS_14SurfaceControlEEEjj", false);
-        if (!tx_setFlags) printf("[sf] 警告：没有 setFlags 符号，点击穿透不可用\n");
-        // Android 12+ 的输入遮挡：图层 touchableRegion 为空也不够，
-        // touchOcclusionMode=BLOCK_UNTRUSTED 时仍会吞掉下面「不受信任」窗口的触摸。
+        if (!tx_setFlags) printf("[sf] warning: setFlags is missing, click-through unavailable\n");
+        // Android 12+ input occlusion: an empty touchableRegion is not enough when
+        // touchOcclusionMode is BLOCK_UNTRUSTED; the layer still swallows those touches.
         tx_setTrustedOverlay = (Fn_Tx_setTrustedOverlay)sym(libgui,
             "_ZN7android21SurfaceComposerClient11Transaction17setTrustedOverlayERKNS_2spINS_14SurfaceControlEEENS_3gui14TrustedOverlayE", false);
         tx_setDropInputMode = (Fn_Tx_setDropInputMode)sym(libgui,
             "_ZN7android21SurfaceComposerClient11Transaction16setDropInputModeERKNS_2spINS_14SurfaceControlEEENS_3gui13DropInputModeE", false);
-        printf("[sf] 覆盖层输入控制：trustedOverlay=%s dropInputMode=%s\n",
-               tx_setTrustedOverlay ? "有" : "无", tx_setDropInputMode ? "有" : "无");
+        printf("[sf] overlay input control: trustedOverlay=%s dropInputMode=%s\n",
+               tx_setTrustedOverlay ? "yes" : "no", tx_setDropInputMode ? "yes" : "no");
         tx_apply       = (Fn_Tx_apply)      sym(libgui, "_ZN7android21SurfaceComposerClient11Transaction5applyEbb", true);
         s8_ctor        = (Fn_String8_ctor)  sym(libutils, "_ZN7android7String8C1EPKc", true);
         s8_dtor        = (Fn_String8_dtor)  sym(libutils, "_ZN7android7String8D1Ev", true);
 
         client = nullptr;
         get_default_bridge(&client, reinterpret_cast<void *>(getDefault));
-        if (!client) { fprintf(stderr, "[sf] getDefault 返回空\n"); return; }
+        if (!client) { fprintf(stderr, "[sf] getDefault returned null\n"); return; }
         ok = true;
         printf("[sf] SurfaceComposerClient = %p\n", client);
         printf("[sf]   mStatus(+0xD0)     = %d\n", *(int32_t *)((char *)client + 0xD0));
         printf("[sf]   mComposerSvc(+0xD8)= %p\n", *(void **)((char *)client + 0xD8));
     }
 
-    // Transaction 的析构没导出，只能按需 new 一块然后泄漏（窗口操作不频繁）
+    // The Transaction destructor is not exported, so each instance is deliberately leaked.
     void *newTx() { void *p = calloc(1, 0x200); tx_ctor(p); return p; }
 
-    // 拖拽时每帧都要 didTransaction，重用一个（AOSP 自己也这么用：apply() 后可继续）
-    // true 时所有 Layer 改动只塞进 sharedTx，不立即 apply，
-    // 等 end_batch() 一次性提交 —— 否则一帧内多次 apply，
-    // SF 会在中间状态合成，缩放/拖拽时逐帧闪。
+    // Transactions are reused: apply() leaves them usable, as AOSP also relies on.
+    // While defer is set, layer changes go into sharedTx and are not applied,
+    // so that end_batch() submits them at once. Several applies per frame make
+    // SurfaceFlinger composite intermediate states and flicker during a gesture.
     bool defer = false;
 
     void *sharedTx = nullptr;
@@ -198,7 +199,7 @@ static inline void end_batch() {
     Lib &L = Lib::get();
     if (!L.defer) return;
     L.defer = false;
-    L.tx_apply(L.txOnce(), false, false);   // 一次事务，原子生效
+    L.tx_apply(L.txOnce(), false, false);   // one transaction, applied atomically
 }
 
 class Layer {
@@ -207,11 +208,11 @@ public:
     void *surface = nullptr;   // Surface*
     ANativeWindow *win = nullptr;
     int32_t w = 0, h = 0;
-    int32_t cap_w = 0, cap_h = 0;      // 已分配的缓冲尺寸（>= 可见尺寸，留余量）
+    int32_t cap_w = 0, cap_h = 0;      // allocated buffer size, at least the visible size
 
-    // format 用 HAL_PIXEL_FORMAT_*：1 = RGBA_8888（内存 R,G,B,A），
-    //   5 = BGRA_8888（内存 B,G,R,A）。客户端 dmabuf/shm 基本都是 ARGB8888，
-    //   也就是内存 B,G,R,A —— 直接用 5 建层就不必逐像素交换了。
+    // format uses HAL_PIXEL_FORMAT_*: 1 = RGBA_8888 (R,G,B,A in memory),
+    // 5 = BGRA_8888 (B,G,R,A). Client dmabufs and shm buffers are mostly ARGB8888,
+    // that is B,G,R,A, so creating the layer with 5 avoids a per-pixel swap.
     bool create(const char *name, int32_t width, int32_t height, int32_t format = 1) {
         Lib &L = Lib::get();
         if (!L.ok) return false;
@@ -228,17 +229,21 @@ public:
             &sc, 0, null_sp, md, &hint);
         L.s8_dtor(name8);
         printf("[sf]   -> rc=%d sc=%p\n", rc, sc);
-        if (rc != 0 || !sc) { fprintf(stderr, "[sf] createSurfaceChecked 失败 rc=%d\n", rc); return false; }
+        if (rc != 0 || !sc) { fprintf(stderr, "[sf] createSurfaceChecked failed rc=%d\n", rc); return false; }
         w = width; h = height;
         surface = nullptr;
         get_surface_bridge(sc, reinterpret_cast<void *>(L.getSurface), &surface);
-        if (!surface) { fprintf(stderr, "[sf] getSurface 失败\n"); return false; }
-        win = (ANativeWindow *)((char *)surface + 0x10);   // ANativeWindow 子对象在 +0x10
+        if (!surface) { fprintf(stderr, "[sf] getSurface failed\n"); return false; }
+        win = (ANativeWindow *)((char *)surface + 0x10);   // the ANativeWindow subobject is at +0x10
         return true;
     }
 
     void place(int32_t x, int32_t y, int32_t z) {
         Lib &L = Lib::get();
+        // sc may not exist yet: a layer surface before configure, or a failed createSurfaceChecked.
+        // Passing an empty SurfaceControl into a transaction makes libgui dereference
+        // null in TransactionState::getLayerState(), which crashes the process.
+        if (!sc) { fprintf(stderr, "[sf] no SF transaction: sc not created\n"); return; }
         void *sp_sc[1] = { sc };
         void *tx = L.txOnce();
         if (L.tx_setLayer) L.tx_setLayer(tx, sp_sc, z);
@@ -247,10 +252,14 @@ public:
         if (!L.defer) L.tx_apply(tx, false, false);
     }
 
-    // 只改位置，不发 setLayer/show。拖拽时每帧叫 place() 会让图层多走一遍 show，
-    // 位置和 buffer 的提交就不同步了 —— 屏幕上就是闪。
+    // Move only. Calling place() every frame during a drag runs show again and
+    // desynchronises the position from the buffer commit, which flickers.
     void move(int32_t x, int32_t y) {
         Lib &L = Lib::get();
+        // sc may not exist yet: a layer surface before configure, or a failed createSurfaceChecked.
+        // Passing an empty SurfaceControl into a transaction makes libgui dereference
+        // null in TransactionState::getLayerState(), which crashes the process.
+        if (!sc) { fprintf(stderr, "[sf] no SF transaction: sc not created\n"); return; }
         void *sp_sc[1] = { sc };
         void *tx = L.txOnce();
         if (L.tx_setPosition) L.tx_setPosition(tx, sp_sc, (float)x, (float)y);
@@ -259,6 +268,10 @@ public:
 
     void setGeometry(const Rect &src, const Rect &dst) {
         Lib &L = Lib::get();
+        // sc may not exist yet: a layer surface before configure, or a failed createSurfaceChecked.
+        // Passing an empty SurfaceControl into a transaction makes libgui dereference
+        // null in TransactionState::getLayerState(), which crashes the process.
+        if (!sc) { fprintf(stderr, "[sf] no SF transaction: sc not created\n"); return; }
         void *sp_sc[1] = { sc };
         void *tx = L.txOnce();
         L.tx_setGeometry(tx, sp_sc, &src, &dst, 0);
@@ -268,24 +281,32 @@ public:
 
     void hide() {
         Lib &L = Lib::get();
+        // sc may not exist yet: a layer surface before configure, or a failed createSurfaceChecked.
+        // Passing an empty SurfaceControl into a transaction makes libgui dereference
+        // null in TransactionState::getLayerState(), which crashes the process.
+        if (!sc) { fprintf(stderr, "[sf] no SF transaction: sc not created\n"); return; }
         void *sp_sc[1] = { sc };
         void *tx = L.txOnce();
         L.tx_hide(tx, sp_sc);
         if (!L.defer) L.tx_apply(tx, false, false);
     }
 
-    // 点击穿透：置 eLayerNotTouchable 后 InputFlinger 会跳过这层，
-    // 触摸落到下面的安卓界面。屏幕上照样看得见（这是“可见但不可摸”）。
-    // 注意：状态没变就不再发事务 —— 每帧多一次 apply() 会让图层闪一下。
+    // Click-through: with eLayerNotTouchable set, InputFlinger skips this layer and the
+    // touch reaches the Android UI below; the layer stays visible.
+    // Unchanged state sends no transaction: an extra apply() per frame flickers.
     bool m_touchable = true;
     bool m_opaque = false;
-    // 声明这一层是**不透明**的：SurfaceFlinger 会忽略 buffer 的 alpha 通道。
-    //   ★ 必须开：我们为了性能直接把客户端的 ARGB8888 原样 memcpy 下来，
-    //     alpha 位是客户端 GL 渲染遗留的不确定值；不开这个标志时 SF 按
-    //     PREMULTIPLIED 混合，每帧 alpha 不同 → 画面忽明忽暗（闪烁）。
-    // 显式显示/隐藏这一层（不改 buffer，不影响客户端）
+    // Mark the layer opaque so SurfaceFlinger ignores the alpha channel of the buffer.
+    // Client ARGB8888 pixels are copied as they are, so their alpha bytes carry
+    // whatever GL left there. Without this flag SurfaceFlinger blends with
+    // PREMULTIPLIED alpha and the picture brightens and dims from frame to frame.
+    // Show or hide the layer without touching the buffer or the client.
     void setVisible(bool on) {
         Lib &L = Lib::get();
+        // sc may not exist yet: a layer surface before configure, or a failed createSurfaceChecked.
+        // Passing an empty SurfaceControl into a transaction makes libgui dereference
+        // null in TransactionState::getLayerState(), which crashes the process.
+        if (!sc) { fprintf(stderr, "[sf] no SF transaction: sc not created\n"); return; }
         void *sp_sc[1] = { sc };
         void *tx = L.txOnce();
         if (on) { if (L.tx_show) L.tx_show(tx, sp_sc); }
@@ -297,6 +318,10 @@ public:
         Lib &L = Lib::get();
         if (on == m_opaque) return true;
         if (!L.tx_setFlags) return false;
+        // sc may not exist yet: a layer surface before configure, or a failed createSurfaceChecked.
+        // Passing an empty SurfaceControl into a transaction makes libgui dereference
+        // null in TransactionState::getLayerState(), which crashes the process.
+        if (!sc) { fprintf(stderr, "[sf] no SF transaction: sc not created\n"); return false; }
         void *sp_sc[1] = { sc };
         void *tx = L.txOnce();
         L.tx_setFlags(tx, sp_sc, on ? SF_LAYER_OPAQUE : 0u, SF_LAYER_OPAQUE);
@@ -309,6 +334,10 @@ public:
         Lib &L = Lib::get();
         if (on == m_touchable) return true;
         if (!L.tx_setFlags) return false;
+        // sc may not exist yet: a layer surface before configure, or a failed createSurfaceChecked.
+        // Passing an empty SurfaceControl into a transaction makes libgui dereference
+        // null in TransactionState::getLayerState(), which crashes the process.
+        if (!sc) { fprintf(stderr, "[sf] no SF transaction: sc not created\n"); return false; }
         void *sp_sc[1] = { sc };
         void *tx = L.txOnce();
         L.tx_setFlags(tx, sp_sc, on ? 0u : SF_LAYER_NOT_TOUCHABLE, SF_LAYER_NOT_TOUCHABLE);
@@ -317,10 +346,14 @@ public:
         return true;
     }
 
-    // 让覆盖层完全不参与输入（光标专用）。
-    // DropInputMode: 0=ALL 1=OBSCURED 2=NONE；TrustedOverlay: 0=TRUSTED 1=UNTRUSTED
+    // Keep an overlay out of input handling entirely (used by the cursor).
+    // DropInputMode: 0=ALL 1=OBSCURED 2=NONE; TrustedOverlay: 0=TRUSTED 1=UNTRUSTED
     bool makeInputTransparent() {
         Lib &L = Lib::get();
+        // sc may not exist yet: a layer surface before configure, or a failed createSurfaceChecked.
+        // Passing an empty SurfaceControl into a transaction makes libgui dereference
+        // null in TransactionState::getLayerState(), which crashes the process.
+        if (!sc) { fprintf(stderr, "[sf] no SF transaction: sc not created\n"); return false; }
         void *sp_sc[1] = { sc };
         void *tx = L.txOnce();
         bool did = false;

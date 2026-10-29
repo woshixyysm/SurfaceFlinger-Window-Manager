@@ -1,17 +1,18 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // misc_ext.hpp
 //
-// content_type / alpha_modifier / fifo / 手势 / warp
+// content_type, alpha_modifier, fifo, pointer gestures and pointer warp.
 //
-// 从 sfwm.cpp 原样搬出（只搬不改，逻辑零差异）。
-// 依赖包含顺序：本文件用到的东西必须由**前面的**模块提供，
-// 因此它在 sfwm.cpp 里的 include 位置就是它原来在文件里的位置。
+// Extracted from the former single-file implementation; behaviour is unchanged.
+// Depends on include order: everything used here is provided by the modules
+// included before it in src/main.cpp.
 #pragma once
 
-// ---------------------------------------------------------------- 小型扩展合集
-// 这几个都是客户端「探测存在性」就决定行为的扩展：实现了就等于告诉它
-// "我是正经合成器"。行为本身可以很轻。
+// ------------------------------------------------- small extension bundle
+// Clients decide their behaviour from the presence of these globals, so providing
+// them only has to be cheap.
 
-// ============ wp_content_type_v1（视频/游戏内容类型，用来切色彩/时序策略）============
+// ---- wp_content_type_v1: content type for colour and timing policy ----
 static void ct_surface_set_type(wl_client *, wl_resource *r, uint32_t type) {
     View *v = (View *)wl_resource_get_user_data(r);
     if (!v) return;
@@ -55,11 +56,11 @@ static void bind_content_type(wl_client *c, void *, uint32_t version, uint32_t i
     wl_resource_set_implementation(r, &ct_manager_impl, nullptr, nullptr);
 }
 
-// ============ wp_alpha_modifier_v1（整表面透明度乘子）============
+// ---- wp_alpha_modifier_v1: surface-wide alpha multiplier ----
 static void am_surface_set_multiplier(wl_client *, wl_resource *r, uint32_t factor) {
     View *v = (View *)wl_resource_get_user_data(r);
     if (!v) return;
-    // 32 位定点：0xFFFFFFFF == 1.0，我们内部用 0..256
+    // 32 bit fixed point where 0xFFFFFFFF is 1.0; 0..256 is used internally.
     v->alpha_mult = (int32_t)(((uint64_t)factor * 256ull) / 0xFFFFFFFFull);
     if (v->alpha_mult < 0) v->alpha_mult = 0;
     if (v->alpha_mult > 256) v->alpha_mult = 256;
@@ -102,8 +103,8 @@ static void bind_alpha_modifier(wl_client *c, void *, uint32_t version, uint32_t
     wl_resource_set_implementation(r, &am_impl, nullptr, nullptr);
 }
 
-// ============ wp_fifo_v1（显式排队/等待栅栏）============
-// 我们本来就是「提交即拷帧」，天然按顺序执行，所以栅栏立刻放行即可。
+// ---- wp_fifo_v1: explicit queueing barriers ----
+// Frames are copied on commit and therefore already ordered, so barriers pass
 static void fifo_set_barrier(wl_client *, wl_resource *) {}
 static void fifo_wait_barrier(wl_client *, wl_resource *) {}
 static void fifo_destroy(wl_client *, wl_resource *r) { wl_resource_destroy(r); }
@@ -144,13 +145,13 @@ static void bind_fifo(wl_client *c, void *, uint32_t version, uint32_t id) {
     wl_resource_set_implementation(r, &fifo_mgr_impl, nullptr, nullptr);
 }
 
-// ============ zwp_pointer_gestures_v1（触控板手势对象）============
-// 真发事件需要触控板多点输入，这里先把对象建出来，客户端不至于因为
-// "缺扩展"而关掉手势支持。
+// ---- zwp_pointer_gestures_v1: touchpad gesture objects ----
+// Emitting real events needs touchpad input; creating the objects keeps clients
+// from disabling gesture support.
 static void gest_obj_destroy(wl_client *, wl_resource *r) { wl_resource_destroy(r); }
 
-// 这三个接口只有 destroy 一个请求，wayland-scanner 不给它们生成 requests 结构，
-// 而且 xyz_interface 这个名字已被 wl_interface 占用 → 自己起名，按 void* 传进去。
+// These interfaces only have destroy, so wayland-scanner emits no requests struct
+// and the xyz_interface name is taken; the structs are declared here.
 struct gest_iface_impl {
     void (*destroy)(struct wl_client *client, struct wl_resource *resource);
 };
@@ -183,8 +184,8 @@ static void pg_get_hold(wl_client *c, wl_resource *res, uint32_t id, wl_resource
 static void pg_release(wl_client *, wl_resource *r) { wl_resource_destroy(r); }
 static void pg_destroy(wl_client *, wl_resource *r) { wl_resource_destroy(r); }
 
-// 同样：这个协议整个生成头里都没有 requests 结构 → 自己声明。
-// 成员顺序必须严格照 XML 的 request 声明顺序（opcode 就是下标）。
+// This header has no requests struct either, so one is declared here.
+// Member order must follow the request order in the XML, since the opcode is the index.
 struct pg_iface_impl {
     void (*get_swipe_gesture)(struct wl_client *, struct wl_resource *, uint32_t, struct wl_resource *);
     void (*get_pinch_gesture)(struct wl_client *, struct wl_resource *, uint32_t, struct wl_resource *);
@@ -210,16 +211,16 @@ static void bind_pointer_gestures(wl_client *c, void *, uint32_t version, uint32
     wl_resource_set_implementation(r, (const void *)&pg_impl, nullptr, nullptr);
 }
 
-// ============ wp_pointer_warp_v1（把指针瞬移到指定 surface 坐标）============
-static int32_t g_pointer_x_abs = 0, g_pointer_y_abs = 0;   // 见已有的 pointer_x/y
-// 签名：warp_pointer(pointer, surface, x, y, serial)
+// ---- wp_pointer_warp_v1: move the pointer to surface coordinates ----
+static int32_t g_pointer_x_abs = 0, g_pointer_y_abs = 0;   // see the existing pointer_x and pointer_y
+// Signature: warp_pointer(pointer, surface, x, y, serial).
 static void warp_warp(wl_client *, wl_resource *r, wl_resource *pointer, wl_resource *surface,
                       wl_fixed_t x, wl_fixed_t y, uint32_t serial) {
     (void)pointer;
     (void)serial;
     View *v = view_from_surface(surface);
     if (!v) return;
-    // 视口内坐标 → 屏幕坐标（按 buffer_scale 放大）
+    // viewport coordinates to screen coordinates, scaled by buffer_scale
     const double lx = wl_fixed_to_double(x), ly = wl_fixed_to_double(y);
     const int32_t sc = v->buf_scale > 0 ? v->buf_scale : 1;
     g_cur_x = v->x + (int32_t)(lx * sc);

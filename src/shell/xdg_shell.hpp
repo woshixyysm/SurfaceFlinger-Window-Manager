@@ -1,10 +1,11 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 // xdg_shell.hpp
 //
 // xdg_wm_base / toplevel / popup / configure
 //
-// 从 sfwm.cpp 原样搬出（只搬不改，逻辑零差异）。
-// 依赖包含顺序：本文件用到的东西必须由**前面的**模块提供，
-// 因此它在 sfwm.cpp 里的 include 位置就是它原来在文件里的位置。
+// Extracted from the former single-file implementation; behaviour is unchanged.
+// Depends on include order: everything used here is provided by the modules
+// included before it in src/main.cpp.
 #pragma once
 
 // ---------------------------------------------------------------- xdg_wm_base
@@ -39,7 +40,7 @@ static void xdg_positioner_set_offset(wl_client *, wl_resource *r, int32_t x, in
     Positioner *p = (Positioner *)wl_resource_get_user_data(r);
     if (p) { p->ox = x; p->oy = y; }
 }
-// v3 新增的三个请求；我们不做 constrain 调整，接受即可（set_reactive 在这份生成头里无参数）
+// The three requests added in v3; set_reactive takes no arguments in this header.
 static void xdg_positioner_set_reactive(wl_client *, wl_resource *) {}
 static void xdg_positioner_set_parent_size(wl_client *, wl_resource *, int32_t, int32_t) {}
 static void xdg_positioner_set_parent_configure(wl_client *, wl_resource *, uint32_t) {}
@@ -65,30 +66,37 @@ static void toplevel_destroy(wl_client *, wl_resource *r) {
 static void toplevel_set_parent(wl_client *, wl_resource *, wl_resource *) {}
 static void toplevel_set_title(wl_client *, wl_resource *r, const char *t) {
     View *v = (View *)wl_resource_get_user_data(r);
-    if (v && t) { snprintf(v->title, sizeof(v->title), "%s", t); }
+    if (v && t) {
+        snprintf(v->title, sizeof(v->title), "%s", t);
+        ftl_on_view_changed(v);    // toplevel lists see the new title immediately
+        ftlm_on_view_changed(v);
+    }
 }
 static void toplevel_set_app_id(wl_client *, wl_resource *r, const char *a) {
     View *v = (View *)wl_resource_get_user_data(r);
-    if (v && a) { snprintf(v->app_id, sizeof(v->app_id), "%s", a); }
+    if (v && a) {
+        snprintf(v->app_id, sizeof(v->app_id), "%s", a);
+        ftl_on_view_changed(v);
+        ftlm_on_view_changed(v);
+    }
 }
 static void toplevel_show_window_menu(wl_client *, wl_resource *, wl_resource *, uint32_t, int32_t, int32_t) {}
 static void toplevel_move(wl_client *, wl_resource *r, wl_resource *, uint32_t) {
     View *v = (View *)wl_resource_get_user_data(r);
     if (!v) return;
-    // 客户端自己发起的移动（有标题栏的客户端才会走这里）：交给输入层做交互式拖拽
+    // Client-initiated move; the input layer performs the interactive drag.
     g_srv.move_view = v;
-    printf("[input] 客户端请求移动: %s\n", v->title[0] ? v->title : "view");
+    printf("[input] client requested a move: %s\n", v->title[0] ? v->title : "view");
 }
 static void toplevel_resize(wl_client *, wl_resource *, wl_resource *, uint32_t, uint32_t) {}
 static void toplevel_set_max_size(wl_client *, wl_resource *, int32_t, int32_t) {}
 static void toplevel_set_min_size(wl_client *, wl_resource *, int32_t, int32_t) {}
 
-// 客户端实际渲染比例（buffer 像素 / 逻辑像素）。
-//   优先用客户端明确上报的 buf_scale；但很多客户端（Qt/OBS）根本不调
-//   set_buffer_scale，只按 wl_output 的 scale 放大 buffer —— 此时 buf_scale 恒为 1。
-//   若拿它去除屏宽，configure 里就发 1272 逻辑宽，客户端给出 2542 的 buffer，
-//   窗口比屏幕还宽、右边整条被裁掉（底部按钮永远点不到）。
-//   第二轮开始用上一轮实测的 bw/req_w 反推，所以即使第一次猜错也能自愈。
+// The render scale the client actually uses: buffer pixels per logical pixel. The
+// reported buf_scale is preferred, but clients such as Qt and OBS never call
+// set_buffer_scale and only follow the wl_output scale. Using the wrong factor produces
+// a window wider than the output with the right edge cropped. From the second configure
+// on, the measured buffer size divided by the requested size corrects the guess.
 static int32_t client_scale(View *v) {
     if (!v) return g_scale > 0 ? g_scale : 1;
     if (v->buf_scale > 1) return v->buf_scale;
@@ -102,7 +110,7 @@ static int32_t client_scale(View *v) {
 }
 
 static void toplevel_send_configure(View *v) {
-    // 窗口可能正在销毁（点“关闭窗口”时 xdg_toplevel 先没了），不拦就会段错
+    // The window may be going away; touching it here would fault.
     if (!v || !v->toplevel || !v->xdg_surface) return;
     struct wl_array states;
     wl_array_init(&states);
@@ -114,16 +122,16 @@ static void toplevel_send_configure(View *v) {
         if (v->want_fullscreen) a[n++] = XDG_TOPLEVEL_STATE_FULLSCREEN;
     }
 
-    // 关键：不要给每个窗口都塞整屏尺寸，否则对话框会被拉满。0x0 = 客户端自己决定。
+    // Never send the full output size, or dialogs get stretched. 0x0 lets the client decide.
     int32_t lw = 0, lh = 0;
-    const int32_t cfgScale = client_scale(v);   // 实测出来的客户端比例
+    const int32_t cfgScale = client_scale(v);   // measured client scale
     if (v->want_maximized || v->want_fullscreen) {
         lw = g_out_w / cfgScale;
         lh = g_out_h / cfgScale;
         if (lw < 1) lw = 1;
         if (lh < 1) lh = 1;
     } else if (v->req_w > 0 && v->req_h > 0) {
-        // 拖边角指定的尺寸优先级高于“客户端自己决定”
+        // A size chosen by dragging an edge takes priority over the client's own choice.
         lw = v->req_w;
         lh = v->req_h;
     }
@@ -132,13 +140,13 @@ static void toplevel_send_configure(View *v) {
     wl_array_release(&states);
 
     const int tver = wl_resource_get_version(v->toplevel);
-    // v4：告诉客户端最大可用尺寸
+    // v4: report the maximum window size.
     if (tver >= 4) {
         int32_t mw = g_out_w / cfgScale;
         int32_t mh = g_out_h / cfgScale;
         xdg_toplevel_send_configure_bounds(v->toplevel, mw, mh);
     }
-    // v5：WM 能力位（窗口菜单/最大化/全屏）
+    // v5: window menu, maximise and fullscreen capabilities.
     if (tver >= 5) {
         struct wl_array caps;
         wl_array_init(&caps);
@@ -247,7 +255,7 @@ static void xdg_surface_get_popup(wl_client *c, wl_resource *r, uint32_t id,
     if (!pr) { wl_client_post_no_memory(c); return; }
     wl_resource_set_implementation(pr, &popup_impl, v, nullptr);
 
-    // 弹窗必须收到 configure 才会映射——没发它就是“菜单不出来”
+    // A popup appears only after a configure; without one the menu never opens.
     int32_t lw = (pos && pos->w > 0) ? pos->w : (v->bw > 0 ? v->bw : 200);
     int32_t lh = (pos && pos->h > 0) ? pos->h : (v->bh > 0 ? v->bh : 200);
     int32_t lx = pos ? (pos->ax + pos->ox) : 0;
@@ -261,7 +269,7 @@ static void xdg_surface_get_popup(wl_client *c, wl_resource *r, uint32_t id,
 
     xdg_popup_send_configure(pr, lx, ly, lw, lh);
     xdg_surface_send_configure(v->xdg_surface, wl_display_next_serial(g_srv.dpy));
-    printf("[sfwm] popup '%s' 逻辑(%d,%d) %dx%d -> 物理(%d,%d)\n",
+    printf("[sfwm] popup '%s' logical(%d,%d) %dx%d -> physical(%d,%d)\n",
            v->title[0] ? v->title : "menu", lx, ly, lw, lh, v->x, v->y);
 }
 

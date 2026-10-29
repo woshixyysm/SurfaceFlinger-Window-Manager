@@ -1,15 +1,15 @@
 #!/bin/sh
-# ci-fetch-termux-deps.sh —— 从 Termux 仓库取 aarch64(bionic) 的
-# wayland / libxkbcommon / libdrm，解出一个可用的前缀（include/ + lib/）。
+# ci-fetch-termux-deps.sh - fetch aarch64 bionic wayland, libxkbcommon and libdrm
+# wayland, libxkbcommon and libdrm and unpack them into a usable prefix.
 #
-# 为什么从 Termux 取而不是自己交叉编译：这三个库跟设备上的运行时必须是同一份
-# ABI（设备跑的就是 Termux 的包）。自己编可以，但那是另一个工程；CI 只需要
-# 「能编过」，所以直接拿设备上那份一模一样的头/库最贴近真实。
+# The libraries must match the runtime on the device, which is the Termux build, so
+# ABI than the device, which runs the Termux packages. Cross compiling them is a
+# separate project; CI only has to compile, so the device headers are the closest match.
 #
-# 用法：sh build-aux/ci-fetch-termux-deps.sh <输出前缀目录>
+# Usage: sh build-aux/ci-fetch-termux-deps.sh <output prefix>
 set -eu
 
-PREFIX=${1:?用法: ci-fetch-termux-deps.sh <输出前缀>}
+PREFIX=${1:?usage: ci-fetch-termux-deps.sh <output prefix>}
 REPO=${TERMUX_REPO:-https://packages.termux.dev/apt/termux-main}
 SUITE=${TERMUX_SUITE:-stable}
 ARCH=${TERMUX_ARCH:-aarch64}
@@ -19,12 +19,12 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$PREFIX/include" "$PREFIX/lib"
 
-echo "---- 取包索引 $REPO/dists/$SUITE/main/binary-$ARCH/Packages.xz ----"
+echo "---- fetching the package index $REPO/dists/$SUITE/main/binary-$ARCH/Packages.xz ----"
 curl -fsSL "$REPO/dists/$SUITE/main/binary-$ARCH/Packages.xz" -o "$work/Packages.xz"
 xz -dc "$work/Packages.xz" > "$work/Packages"
-echo "索引 $(grep -c '^Package: ' "$work/Packages") 个包"
+echo "index lists $(grep -c '^Package: ' "$work/Packages") packages"
 
-# 用 python 精确匹配包名（别用 grep，wayland-protocols / libxkbcommon-x11 会被误伤）
+# Package names are matched exactly, since grep would also hit related packages.
 for pkg in $WANT; do
     fn=$(python3 - "$work/Packages" "$pkg" <<'PY'
 import sys
@@ -37,34 +37,34 @@ for stanza in open(sys.argv[1], encoding="utf-8", errors="replace").read().split
             k, v = line.split(": ", 1)
             d[k] = v
     if d.get("Package") == pkg:
-        best = d.get("Filename")           # 同一包出现多次时取最后一个（最新）
+        best = d.get("Filename")           # last entry wins when a package repeats
 print(best or "")
 PY
 )
     if [ -z "$fn" ]; then
-        echo "❌ 索引里没有名为 '$pkg' 的包。相近的：" >&2
+        echo "no package named '$pkg' in the index; similar names:" >&2
         grep '^Package: ' "$work/Packages" | grep -i "$pkg" | sed 's/^/    /' >&2 || true
         exit 1
     fi
-    echo "---- 下载 $pkg -> $fn ----"
+    echo "---- downloading $pkg -> $fn ----"
     curl -fsSL "$REPO/$fn" -o "$work/$pkg.deb"
     dpkg-deb -x "$work/$pkg.deb" "$work/x-$pkg"
-    # Termux 的 deb 展开后是 data/data/com.termux/files/usr/...
+    # A Termux deb unpacks to data/data/com.termux/files/usr/...
     src=$(find "$work/x-$pkg" -type d -name usr | head -1)
-    [ -n "$src" ] || { echo "解不开 $pkg 的目录结构" >&2; exit 1; }
+    [ -n "$src" ] || { echo "cannot find the directory layout of $pkg" >&2; exit 1; }
     [ -d "$src/include" ] && cp -a "$src/include/." "$PREFIX/include/" 2>/dev/null || true
     [ -d "$src/lib" ] && cp -a "$src/lib/." "$PREFIX/lib/" 2>/dev/null || true
 done
 
 mkdir -p "$PREFIX/include" "$PREFIX/lib"
 mkdir -p "$PREFIX/include" "$PREFIX/lib"
-echo "---- 前缀内容 ----"
+echo "---- prefix contents ----"
 echo "include: $(ls "$PREFIX/include" 2>/dev/null | tr '\n' ' ' | cut -c1-200)"
 echo "lib    : $(ls "$PREFIX/lib" 2>/dev/null | tr '\n' ' ' | cut -c1-200)"
 
 for must in "$PREFIX/include/wayland-server-core.h" \
             "$PREFIX/include/xkbcommon/xkbcommon.h" \
             "$PREFIX/include/xf86drm.h"; do
-    [ -f "$must" ] || { echo "❌ 缺头文件: $must" >&2; exit 1; }
+    [ -f "$must" ] || { echo "missing header: $must" >&2; exit 1; }
 done
-echo "✅ Termux 依赖就绪"
+echo "Termux dependencies ready"
