@@ -66,11 +66,32 @@ CC=clang CXX=clang++ meson setup build --prefix=$PREFIX
 ninja -C build
 ```
 
-`clang` must be given explicitly. The default `c++` on Termux is GCC 17 with libstdc++,
-which rejects the out of order designated initialisers used in the source. `--prefix` is
-required as well, because the build uses it to locate the Wayland headers and libraries.
+The compiler is named explicitly for reproducibility. A stock Termux installation uses
+clang, which is also what `gcc`, `g++` and `c++` point at. The development device instead
+has a separate GCC 17 toolchain installed ahead of clang on `PATH`, and that compiler
+rejects the out of order designated initialisers used in the source, so `CC` and `CXX` are
+set here rather than relying on the default. `--prefix` is required as well, because the
+build uses it to locate the Wayland headers and libraries.
 
 `build/sfwm` is the result.
+
+### Reference environment
+
+The numbers and log excerpts quoted in this file and in the source comments were taken on
+the machine this was developed on, not on a generic device:
+
+| item | value |
+|---|---|
+| device | OnePlus PLQ110, Android 16, `aarch64` |
+| compiler | clang 21 from Termux (`gcc` and `g++` are symlinks to it) |
+| graphics stack | locally built Mesa 26.2.5 driving the msm and KGSL backend |
+| GPU | Adreno 830 |
+
+The GL version a user sees depends on the EGL implementation that is loaded, so sfwm logs
+it once at startup as `[gl] GPU composition ready: <GL_VERSION> | <GL_RENDERER>`. With the
+Mesa build above the line reports a 4.6 core profile and `Adreno (TM) 830`. The driver
+shipped with Android reports a different version, because it is a different GL
+implementation.
 
 ## Running
 

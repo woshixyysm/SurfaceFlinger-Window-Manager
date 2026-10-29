@@ -19,9 +19,13 @@
 // SurfaceFlinger stride. Rebuilding Mesa with platforms=android allows replacing that call
 // with eglCreateWindowSurface plus eglSwapBuffers, without changes above this file.
 //
-// Measured on OnePlus PLQ110 (Adreno 830): GL 4.6 core profile, Mesa 26.2.5,
-// EGL_EXT_image_dma_buf_import with modifiers, and gbm_bo_create(LINEAR) yielding
-// modifier 0, which EGL imports directly.
+// The GL version is whatever the context reports; sfwm logs it once at startup as
+// "[gl] GPU composition ready: <GL_VERSION> | <GL_RENDERER>". On the development device
+// (OnePlus PLQ110, Adreno 830) with a locally built Mesa 26.2.5 driving the msm and KGSL
+// backend, that line reads 4.6 core profile and Adreno (TM) 830, alongside
+// EGL_EXT_image_dma_buf_import with modifiers and gbm_bo_create(LINEAR) yielding
+// modifier 0, which EGL imports directly. The values describe this Mesa build; the driver
+// shipped with Android reports a different version.
 //
 // Set SFWM_GL=0 to fall back to the CPU copy.
 #pragma once
