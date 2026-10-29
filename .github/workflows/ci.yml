@@ -35,9 +35,6 @@ jobs:
   cross:
     name: cross build with a custom NDK and the Termux headers
     runs-on: ubuntu-latest
-    # First run only: the download and unpack paths of the runner cannot be reproduced
-    # locally, so a failure here must not block the repository.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
