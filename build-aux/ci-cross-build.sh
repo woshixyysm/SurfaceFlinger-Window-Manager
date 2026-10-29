@@ -142,7 +142,9 @@ setup_toolchain
 # The protocol .c files must be compiled as C; in C++ wl_interface becomes internal
 # linkage and the link fails.
 CFLAGS="$TARGET -std=gnu11 -O2 -w -I$OUT/inc -isystem $DEPS/include"
-CXXFLAGS="$TARGET -std=c++17 -O2 -w -g -I$OUT/inc -isystem $DEPS/include"
+# Modules include each other relative to src/, the same way meson is configured with
+# include_directories('src'), so that directory has to be on the include path here too.
+CXXFLAGS="$TARGET -std=c++17 -O2 -w -g -I$ROOT/src -I$OUT/inc -isystem $DEPS/include"
 
 echo "---- compiling protocol .c files as C ----"
 for c in "$OUT/inc"/*-protocol.c; do
@@ -157,7 +159,7 @@ if [ -n "${SYSLIB:-}" ] && [ -d "${SYSLIB:-}" ]; then
 fi
 # shellcheck disable=SC2086  # word splitting is intended here
 $CLANGXX $CXXFLAGS -o "$OUT/sfwm" \
-    "$ROOT/src/sfwm.cpp" "$OUT"/obj/*.o \
+    "$ROOT/src/main.cpp" "$OUT"/obj/*.o \
     $LFLAGS \
     -lwayland-server -lxkbcommon -ldrm $ANDROID_LIBS \
     $LENIENT
