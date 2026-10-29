@@ -185,11 +185,11 @@ which is what makes CJK input work; key codes alone cannot express it.
 `tools/` contains scripts that run on the device with root:
 
 - `pack-deps.sh` packs the Termux headers and libraries used by CI
-- `desktop-mode.sh` stops the Android launcher to free the screen for sfwm
-- `android-desktop.sh` enables Android freeform windows
-- `kill-foreground.sh` force-stops the foreground application
 - `kill-heavy.sh` force-stops a list of packages and reports memory
 - `quiesce.sh` restricts a list of packages so they cannot restart themselves
+
+Manual work in the Android UI, such as stopping the launcher or enabling freeform
+windows, is left to the user rather than scripted here.
 
 ## Testing
 
@@ -236,6 +236,45 @@ implementation, the comment at that point names it.
 
 The protocol XML files under `protocols/`, and the Wayland, xkbcommon, libdrm and Mesa
 libraries this links against, are third party code and remain under their own licences.
+
+### Other projects that run Wayland on Android
+
+These were read before writing the Android side of this compositor, and they solve parts
+of the same problem in different ways. None of their source code is used here; the only
+code taken from another tree is the protocol XML under `protocols/`. Their licences are
+listed because they define the state of the art this builds on.
+
+- **[wldroid](https://github.com/Shelnutt2/wldroid)**, MIT. A wlroots compositor packaged
+  as Android library modules, with a proot managed rootfs, VirGL and Venus GPU
+  translation, and DRM, GBM and EGL shim libraries. It embeds the compositor in an app and
+  composes into an AHardwareBuffer.
+- **[anland](https://github.com/SuperTurtleDev/anland)**, GPL-3.0. Runs container
+  applications as native Android windows: one Activity and Surface per `xdg_toplevel`
+  rather than one virtual screen, with clients connected over binder instead of a socket.
+  It offers a SurfaceControl backend that leaves composition to SurfaceFlinger and an EGL
+  backend that composites per window.
+- **[wlroots-android-bridge](https://github.com/Xtr126/wlroots-android-bridge)**, GPL-3.0.
+  Drives a wlroots compositor, now labwc, from an app over AIDL, allocating through
+  minigbm gralloc handles and presenting each window with SurfaceControl transactions
+  instead of an EGL swapchain.
+- **[piperella-wayland-compositor](https://github.com/Piperella/Piperella-Wayland-Compositor)**,
+  GPL-3.0. Runs `libwayland-server` inside an Android app, composites with EGL and GLES3
+  into a SurfaceView with a zero copy dmabuf path, and paces rendering on Choreographer.
+  Its binder input path is derived from wlroots-android-bridge.
+- **[droidloom](https://github.com/denialwm/droidloom)**, GPL-3.0-or-later. The opposite
+  direction: it runs Android applications inside a Linux Wayland session, which is useful
+  for the parts of this problem that concern input and clipboard bridging.
+- **[termux-wayland](https://github.com/HomuHomu833/termux-wayland)**, GPL-3.0. A fork of
+  Termux:X11 with the X server replaced by a Wayland compositor. It draws all windows with
+  GLES into one AHardwareBuffer per refresh, and the Android app displays that buffer and
+  feeds input back.
+
+sfwm takes a different route from all of them. It is not embedded in an application and
+does not hand a single buffer to an app: it runs as a privileged process next to
+SurfaceFlinger, creates one SurfaceFlinger layer per surface, and writes into that layer
+buffer directly. That needs root, which the projects above avoid, and in exchange it needs
+neither a shim layer for the Android graphics stack nor a compositor inside the app
+process.
 
 ## Development
 
