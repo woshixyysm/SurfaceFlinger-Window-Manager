@@ -18,7 +18,7 @@
 #include <unistd.h>
 #include <vector>
 
-// ═══════════════════════════════════════════════════════ zwlr_output_power_v1
+// ======================================================= zwlr_output_power_v1
 static const char *opm_name(int mode) { return mode == 1 ? "on" : "off"; }
 
 static void op_destroy_req(wl_client *, wl_resource *r) { wl_resource_destroy(r); }
@@ -61,7 +61,7 @@ static void bind_output_power(wl_client *c, void *, uint32_t version, uint32_t i
     printf("[opm] zwlr_output_power_manager_v1 bound\n");
 }
 
-// ═══════════════════════════════════════════════════ zwlr_gamma_control_v1
+// =================================================== zwlr_gamma_control_v1
 static void gc_destroy_req(wl_client *, wl_resource *r) { wl_resource_destroy(r); }
 
 static void gc_set_gamma(wl_client *, wl_resource *r, int32_t fd) {

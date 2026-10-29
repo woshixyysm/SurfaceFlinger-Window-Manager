@@ -68,7 +68,7 @@ static void pres_send_presented(View *v);
 static void sync_wait_acquire(View *v);
 static void sync_signal_release(View *v);
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // ------------------------------------------------------------- built-in cursor
 //
 // The cursor is drawn here because wl_pointer.set_cursor is only sent by toolkits that

@@ -81,14 +81,14 @@ extern "C" {
 #include <string>
 #include <vector>
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Fds handed to clients must not come from memfd_create. A memfd inherits the SELinux
 // label of its creator, and sfwm runs as root while clients run as applications; an fd
 // crossing MLS categories is denied by security_file_receive, and the rule is dontaudit,
 // so nothing appears in dmesg. The client just loses the fd, which breaks Xwayland, OBS
 // and EGL initialisation. A regular file in XDG_RUNTIME_DIR carries a label in the
 // client's own category, so the transfer is allowed.
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 static int sfwm_rt_file(const char *name, size_t size) {
     const char *rt = getenv("XDG_RUNTIME_DIR");
     if (!rt || !*rt) return -1;
