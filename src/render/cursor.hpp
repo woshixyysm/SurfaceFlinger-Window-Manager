@@ -392,13 +392,13 @@ static void cursor_build(uint32_t shape) {
         g_cur_hx = 11; g_cur_hy = 11;
         break;
     }
-    case 20: case 24: case 28: {           // ne / sw / nesw-resize  →  "/"
+    case 20: case 24: case 28: {           // ne / sw / nesw-resize  ->  "/"
         cur_dbl_arrow(2, 2, CUR_OPQ);
         cur_dbl_arrow(2, 1, CUR_WHT);
         g_cur_hx = 11; g_cur_hy = 11;
         break;
     }
-    case 21: case 23: case 29: {           // nw / se / nwse-resize  →  "\"
+    case 21: case 23: case 29: {           // nw / se / nwse-resize  ->  "\"
         cur_dbl_arrow(3, 2, CUR_OPQ);
         cur_dbl_arrow(3, 1, CUR_WHT);
         g_cur_hx = 11; g_cur_hy = 11;

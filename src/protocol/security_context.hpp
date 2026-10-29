@@ -2,7 +2,7 @@
 // security_context.hpp
 //
 // wp_security_context_manager_v1, the identity channel for sandboxed clients.
-// （wayland-protocols staging/security-context）。
+// in wayland-protocols staging/security-context.
 //
 // It works by passing sockets, not by declaring identity:
 //   1. the sandbox host binds a unix listening socket and passes two fds with
