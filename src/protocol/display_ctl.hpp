@@ -19,8 +19,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dirent.h>
 #include <fcntl.h>
-#include <glob.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -67,17 +67,31 @@ static bool disp_write_int(const char *path, int v) {
 }
 
 // ---------------------------------------------------------- brightness
+// The backlight device is found by scanning the class directory rather than with glob(),
+// which keeps the lookup to opendir and readdir. The first entry that exposes a writable
+// brightness file is used.
 static bool disp_bl_init() {
     if (g_dc.bl_path[0]) return g_dc.bl_max > 0;
-    glob_t g;
-    memset(&g, 0, sizeof(g));
-    if (glob("/sys/class/backlight/*/brightness", 0, nullptr, &g) != 0 || g.gl_pathc == 0) {
-        printf("[disp] no /sys/class/backlight/*/brightness, brightness is not controllable\n");
-        globfree(&g);
+    DIR *d = opendir("/sys/class/backlight");
+    if (!d) {
+        printf("[disp] cannot open /sys/class/backlight, brightness is not controllable\n");
         return false;
     }
-    snprintf(g_dc.bl_path, sizeof(g_dc.bl_path), "%s", g.gl_pathv[0]);
-    globfree(&g);
+    bool found = false;
+    while (struct dirent *e = readdir(d)) {
+        if (e->d_name[0] == '.') continue;
+        char path[sizeof(g_dc.bl_path)];
+        snprintf(path, sizeof(path), "/sys/class/backlight/%s/brightness", e->d_name);
+        if (access(path, W_OK) != 0) continue;
+        snprintf(g_dc.bl_path, sizeof(g_dc.bl_path), "%s", path);
+        found = true;
+        break;
+    }
+    closedir(d);
+    if (!found) {
+        printf("[disp] no writable backlight under /sys/class/backlight\n");
+        return false;
+    }
     char maxp[sizeof(g_dc.bl_path) + 16];
     snprintf(maxp, sizeof(maxp), "%s", g_dc.bl_path);
     char *slash = strrchr(maxp, '/');
