@@ -204,6 +204,9 @@ static void handle_frame() {
         g_touch_x = fx - g_touch_app->x;
         g_touch_y = fy - g_touch_app->y;
         appwin_touch(g_touch_app, "move", g_touch_x, g_touch_y, 0);
+        static int forwarded = 0;
+        if (++forwarded % 30 == 1)
+            printf("[app] touch move %d,%d -> slot %d\n", g_touch_x, g_touch_y, g_touch_app->slot);
         return;
     }
 
@@ -531,12 +534,23 @@ static void handle_frame() {
         // the focus here is what makes the keyboard follow the tile the finger chose.
         tile_tap_focus(fx, fy);
         // Touch is delivered by this compositor, so a contact on an Android tile goes to its
-        // display from here: nothing else routes it, the tile is not a window of ours.
+        // display from here: nothing else routes it, the tile is not a window of ours. The
+        // gesture belongs to the application from this point on: no window drag, no long
+        // press, no cursor over the tile, or the compositor would eat the swipe.
         g_touch_app = app;
         if (g_touch_app) {
             g_touch_x = fx - g_touch_app->x;
             g_touch_y = fy - g_touch_app->y;
             appwin_touch(g_touch_app, "down", g_touch_x, g_touch_y, 0);
+            printf("[app] touch down %d,%d -> slot %d\n", g_touch_x, g_touch_y, g_touch_app->slot);
+            g_owner = OWNER_CLIENT;
+            g_client_view = nullptr;
+            g_press_x = fx;
+            g_press_y = fy;
+            g_prev_primary = g_primary_slot;
+            if (g_lp_timer) wl_event_source_timer_update(g_lp_timer, 0);
+            cursor_hide();
+            return;
         }
         int corner = corner_hit(hv, fx, fy);
         // A corner press no longer resizes immediately: it is armed first and only starts
