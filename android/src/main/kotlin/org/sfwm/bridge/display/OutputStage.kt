@@ -31,6 +31,7 @@ class OutputStage(
     private val surfaceSink: (slot: Int, surface: Surface) -> Unit,
     private val surfaceGoneSink: (slot: Int) -> Unit,
     private val touchSink: (slot: Int, action: Int, x: Float, y: Float) -> Unit,
+    private val keySink: (slot: Int, action: Int, keyCode: Int, metaState: Int) -> Unit,
     private val resizeSink: (taskId: Int, placement: OutputPlacement) -> Boolean,
 ) {
     private val placements = HashMap<Int, OutputPlacement>()
@@ -71,12 +72,22 @@ class OutputStage(
                     onMain { touchSink(slot, action, x, y) }
                     return true
                 }
+                HostLink.CODE_KEY -> {
+                    val action = data.readInt()
+                    val keyCode = data.readInt()
+                    val metaState = data.readInt()
+                    onMain { keySink(slot, action, keyCode, metaState) }
+                    return true
+                }
             }
             return super.onTransact(code, data, reply, flags)
         }
     }
 
     fun isMounted(slot: Int): Boolean = endpoints[slot]?.peer != null
+
+    /** The task Android gave the window, so the shell can order and focus it. */
+    fun taskIdOf(slot: Int): Int = endpoints[slot]?.taskId ?: -1
 
     /** The last surface the window reported; a window that moved still renders into it. */
     fun surfaceOf(slot: Int): Surface? = surfaces[slot]

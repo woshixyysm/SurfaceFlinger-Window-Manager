@@ -408,10 +408,20 @@ static void kb_set_focus(View *v) {
     tile_on_focus(v);      // the tiling focus follows the keyboard focus
 }
 
+// The Android window that holds the tile focus, if any: it takes the key instead of a
+// Wayland client, because it has no surface a keyboard could enter.
+static AppWin *kb_app_focus() {
+    if (!g_tile_focus) return nullptr;
+    return tile_app(g_tile_focus);
+}
+
 static void kb_key(uint32_t code, bool pressed) {
-    if (g_srv.keyboards.empty()) { printf("[kbd] no client is listening for keys\n"); return; }
-    if (!g_srv.kb_focus) kb_set_focus(front_view());
-    if (!g_srv.kb_focus) { printf("[kbd] no focusable window, dropping key %u\n", code); return; }
+    AppWin *app = kb_app_focus();
+    if (!app) {
+        if (g_srv.keyboards.empty()) { printf("[kbd] no client is listening for keys\n"); return; }
+        if (!g_srv.kb_focus) kb_set_focus(front_view());
+        if (!g_srv.kb_focus) { printf("[kbd] no focusable window, dropping key %u\n", code); return; }
+    }
     kb_xkb_init();
     if (g_xkb_state)
         xkb_state_update_key(g_xkb_state, code + 8, pressed ? XKB_KEY_DOWN : XKB_KEY_UP);
@@ -422,6 +432,16 @@ static void kb_key(uint32_t code, bool pressed) {
     } else {
         for (size_t i = 0; i < g_pressed_keys.size(); i++)
             if (g_pressed_keys[i] == code) { g_pressed_keys.erase(g_pressed_keys.begin() + i); break; }
+    }
+    if (app) {
+        // Keys for an Android window go through the shell, not through this socket: the
+        // window that receives them is the host task, and it hands them to its display.
+        static bool once = false;
+        if (!once) {
+            once = true;
+            printf("[kbd] '%s' has the focus; the shell delivers its keys\n", app->pkg);
+        }
+        return;
     }
     uint32_t serial = wl_display_next_serial(g_srv.dpy);
     uint32_t t = now_ms();

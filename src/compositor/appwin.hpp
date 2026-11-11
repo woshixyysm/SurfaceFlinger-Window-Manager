@@ -192,6 +192,15 @@ static void appwin_close(int32_t slot) {
     if (appwin_send(line)) printf("[app] %s\n", line);
 }
 
+// Android windows cannot be handed the keyboard the way a Wayland client is: keys reach
+// whichever window the shell thinks is focused, so focusing a tile means raising its task.
+static bool appwin_focus(AppWin *a) {
+    if (!a) return false;
+    char line[48];
+    snprintf(line, sizeof(line), "focus %d", a->slot);
+    return appwin_send(line);
+}
+
 
 
 static void appwin_list() {    if (g_apps.empty()) {

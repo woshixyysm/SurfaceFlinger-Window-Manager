@@ -17,6 +17,7 @@
 static void    kb_set_focus(View *v);
 static int32_t client_scale(View *v);
 static void    toplevel_send_configure(View *v);
+static void    tile_focus_set(void *p);
 
 // ------------------------------------------------------------------ state
 enum TileLayout { TILE_DWINDLE = 0, TILE_MASTER = 1 };
@@ -30,9 +31,13 @@ static int     g_tile_masters = 1;     // windows in the master column
 // Insertion order of the tiled windows, and the ones that opted out. Append-only order is
 // what dwindle needs; a window removed from the tree simply disappears from the list, so
 // no explicit tree surgery is required when a client goes away.
-static std::vector<View *> g_tile_order;
+//
+// The order is shared: an entry is a View for a Wayland window or an AppWin for an Android
+// one. Both kinds are placed by the same pass, so focus, swapping and boundaries do not care
+// which side a window lives on.
+static std::vector<void *> g_tile_order;
 static std::vector<View *> g_tile_floating;
-static View *g_tile_focus = nullptr;
+static void *g_tile_focus = nullptr;
 
 // A dwindle split belongs to the window that opens its group. Storing the ratio per split
 // is what keeps a resize local: moving one boundary cannot move the rest of the screen.
@@ -45,12 +50,27 @@ struct TileNode { void *owner; sf::Rect rect; bool vertical; float ratio; };
 static std::vector<TileNode> g_tile_nodes;
 
 // ------------------------------------------------------------------ helpers
-static int tile_index_of(const std::vector<View *> &list, View *v);   // defined below
+static int tile_index_of(const std::vector<void *> &list, void *p);   // defined below
 
 static bool tile_known(View *v) {
     if (!v) return false;
     for (View *o : g_srv.views) if (o == v) return true;
     return false;
+}
+
+/** The Android window behind an entry, or null when the entry is a Wayland view. */
+static AppWin *tile_app(const void *p) {
+    for (AppWin *a : g_apps) if ((const void *)a == p) return a;
+    return nullptr;
+}
+
+static View *tile_view(void *p) { return tile_app(p) ? nullptr : (View *)p; }
+
+static const char *tile_name(void *p) {
+    if (AppWin *a = tile_app(p)) return a->pkg;
+    View *v = (View *)p;
+    if (!v) return "(none)";
+    return v->title[0] ? v->title : "view";
 }
 
 static bool tile_candidate(View *v) {
@@ -64,6 +84,13 @@ static bool tile_is_floating(View *v) {
     return false;
 }
 
+/** A window the layout may place right now, whatever side of the bridge it lives on. */
+static bool tile_live(void *p) {
+    if (AppWin *a = tile_app(p)) return a->w > 0 && a->h > 0 && a->ws == g_ws_active;
+    View *v = (View *)p;
+    return tile_candidate(v) && v->ws == g_ws_active && !tile_is_floating(v);
+}
+
 // True while the window's geometry belongs to the layout. Gestures and commands ask this
 // before they touch a window, so a managed window can never be dragged out of its tile.
 static bool tile_owns(View *v) {
@@ -71,7 +98,6 @@ static bool tile_owns(View *v) {
     if (!tile_candidate(v) || tile_is_floating(v)) return false;
     return v->ws == g_ws_active && tile_index_of(g_tile_order, v) >= 0;
 }
-
 static float tile_split_of(void *owner) {
     for (const TileSplit &s : g_tile_splits) if (s.owner == owner) return s.ratio;
     return 0.f;
@@ -95,14 +121,13 @@ static const TileNode *tile_node_of(void *owner) {
 
 // A split owner is a View or an AppWin, so liveness is checked for both kinds.
 static bool tile_owner_alive(void *owner) {
-    for (AppWin *a : g_apps)
-        if ((void *)a == owner) return a->w > 0 && a->h > 0;
+    if (AppWin *a = tile_app(owner)) return a->w > 0 && a->h > 0;
     return tile_candidate((View *)owner);
 }
 
-static void tile_untrack(View *v) {
+static void tile_untrack(void *p) {
     for (size_t i = 0; i < g_tile_order.size(); i++) {
-        if (g_tile_order[i] != v) continue;
+        if (g_tile_order[i] != p) continue;
         g_tile_order.erase(g_tile_order.begin() + i);
         return;
     }
@@ -111,8 +136,13 @@ static void tile_untrack(View *v) {
 // Drops destroyed, unmapped and floating windows. Membership is checked before any field
 // is read, so a pointer to a view that has already been deleted is never dereferenced.
 static void tile_prune() {
-    std::vector<View *> kept;
-    for (View *v : g_tile_order) {
+    std::vector<void *> kept;
+    for (void *p : g_tile_order) {
+        if (AppWin *a = tile_app(p)) {
+            if (a->w > 0 && a->h > 0) kept.push_back(p);
+            continue;
+        }
+        View *v = (View *)p;
         if (!tile_candidate(v)) continue;
         if (tile_is_floating(v)) continue;
         kept.push_back(v);
@@ -122,18 +152,17 @@ static void tile_prune() {
         if (tile_owner_alive(g_tile_splits[i].owner)) i++;
         else g_tile_splits.erase(g_tile_splits.begin() + i);
     }
-    if (g_tile_focus && (!tile_candidate(g_tile_focus) || g_tile_focus->ws != g_ws_active))
-        g_tile_focus = nullptr;
+    if (g_tile_focus && !tile_live(g_tile_focus)) g_tile_focus = nullptr;
 }
 
-static void tile_active_list(std::vector<View *> &out) {
+static void tile_active_list(std::vector<void *> &out) {
     out.clear();
-    for (View *v : g_tile_order)
-        if (v->ws == g_ws_active) out.push_back(v);
+    for (void *p : g_tile_order)
+        if (tile_live(p)) out.push_back(p);
 }
 
-static int tile_index_of(const std::vector<View *> &list, View *v) {
-    for (size_t i = 0; i < list.size(); i++) if (list[i] == v) return (int)i;
+static int tile_index_of(const std::vector<void *> &list, void *p) {
+    for (size_t i = 0; i < list.size(); i++) if (list[i] == p) return (int)i;
     return -1;
 }
 
@@ -144,15 +173,6 @@ static sf::Rect tile_rect(int32_t x, int32_t y, int32_t w, int32_t h) {
     r.right = x + (w > 0 ? w : 1);
     r.bottom = y + (h > 0 ? h : 1);
     return r;
-}
-
-// The windows the layout places, in order: the Wayland views first, then the Android
-// windows. The keys are opaque so one layout pass can size both kinds.
-static void tile_keys(const std::vector<View *> &views, std::vector<void *> &keys) {
-    keys.clear();
-    for (View *v : views) keys.push_back(v);
-    for (AppWin *a : g_apps)
-        if (a->ws == g_ws_active && a->w > 0 && a->h > 0) keys.push_back(a);
 }
 
 // ------------------------------------------------------------------ layout
@@ -242,17 +262,16 @@ static void tile_rects(const std::vector<void *> &keys, std::vector<sf::Rect> &o
 
 static void tile_apply() {
     if (!g_tile_on) return;
-    std::vector<View *> list;
-    std::vector<void *> keys;
+    std::vector<void *> list;
     std::vector<sf::Rect> rects;
     tile_active_list(list);
-    tile_keys(list, keys);
-    tile_rects(keys, rects);
-    if (keys.size() != rects.size()) return;
+    tile_rects(list, rects);
+    if (list.size() != rects.size()) return;
 
     sf::begin_batch();
     for (size_t i = 0; i < list.size(); i++) {
-        View *v = list[i];
+        View *v = tile_view(list[i]);
+        if (!v) continue;
         const sf::Rect &r = rects[i];
         int32_t w = r.right - r.left;
         int32_t h = r.bottom - r.top;
@@ -271,10 +290,16 @@ static void tile_apply() {
 
     // An Android window has no surface to configure: its display is hosted by the module,
     // so the tile is applied by moving that window.
-    for (size_t i = list.size(); i < keys.size(); i++) {
+    for (size_t i = 0; i < list.size(); i++) {
+        AppWin *a = tile_app(list[i]);
+        if (!a) continue;
         const sf::Rect &r = rects[i];
-        appwin_place((AppWin *)keys[i], r.left, r.top, r.right - r.left, r.bottom - r.top);
+        appwin_place(a, r.left, r.top, r.right - r.left, r.bottom - r.top);
     }
+
+    // Something has to hold the focus, or a key would have nowhere to go: with the hosts as
+    // tasks the first tile is also the one the shell has in front.
+    if (!g_tile_focus && !list.empty()) tile_focus_set(list.front());
 }
 
 // Publishes the current tiling order to the layout. Safe to call from any event: it prunes
@@ -288,32 +313,34 @@ static void tile_sync() {
         if (tile_is_floating(v)) continue;
         if (tile_index_of(g_tile_order, v) < 0) g_tile_order.push_back(v);
     }
+    for (AppWin *a : g_apps) {
+        if (a->ws != g_ws_active || a->w <= 0 || a->h <= 0) continue;
+        if (tile_index_of(g_tile_order, a) < 0) g_tile_order.push_back(a);
+    }
     tile_apply();
 }
 
 // ------------------------------------------------------------------ focus and swap
-static bool tile_current_rects(std::vector<View *> &list, std::vector<sf::Rect> &rects) {
+static bool tile_current_rects(std::vector<void *> &list, std::vector<sf::Rect> &rects) {
     tile_prune();
     tile_active_list(list);
-    std::vector<void *> keys;
-    tile_keys(list, keys);
-    tile_rects(keys, rects);
-    return !list.empty() && list.size() == keys.size() && rects.size() == keys.size();
+    tile_rects(list, rects);
+    return !list.empty() && rects.size() == list.size();
 }
 
 // Picks the window whose centre is nearest in the requested direction. Comparing centres
 // and weighting the cross axis is what makes the choice feel like a grid instead of a list.
-static View *tile_neighbour(const std::vector<View *> &list, const std::vector<sf::Rect> &rects,
-                            View *from, int dx, int dy) {
+static void *tile_neighbour(const std::vector<void *> &list, const std::vector<sf::Rect> &rects,
+                            void *from, int dx, int dy) {
     const int fi = tile_index_of(list, from);
     if (fi < 0) return nullptr;
     const sf::Rect &fr = rects[fi];
     const long fcx = (long)fr.left + fr.right;
     const long fcy = (long)fr.top + fr.bottom;
 
-    View *best = nullptr;
+    void *best = nullptr;
     long best_score = 0;
-    View *fallback = nullptr;
+    void *fallback = nullptr;
     long fallback_score = 0;
     for (size_t i = 0; i < list.size(); i++) {
         if ((int)i == fi) continue;
@@ -356,56 +383,70 @@ static void tile_raise(View *v) {
     }
 }
 
-static View *tile_focused(const std::vector<View *> &list) {
+/**
+ * Gives a window the focus. A Wayland client gets the keyboard directly; an Android window
+ * cannot, so the shell is asked to raise its task instead: keys reach whichever window the
+ * shell considers focused, and that has to be the tile the user is working in.
+ */
+static void tile_focus_set(void *p) {
+    if (!p) return;
+    if (AppWin *a = tile_app(p)) {
+        if (g_srv.kb_focus) kb_set_focus(nullptr);   // no Wayland client keeps the keyboard
+        g_tile_focus = a;
+        appwin_focus(a);
+        printf("[tile] focus '%s'\n", a->pkg);
+        return;
+    }
+    kb_set_focus((View *)p);   // sets the tiling focus through tile_on_focus
+}
+
+static void *tile_focused(const std::vector<void *> &list) {
     if (g_tile_focus && tile_index_of(list, g_tile_focus) >= 0) return g_tile_focus;
-    if (g_srv.kb_focus && tile_index_of(list, g_srv.kb_focus) >= 0) return g_srv.kb_focus;
+    if (g_srv.kb_focus && tile_index_of(list, (void *)g_srv.kb_focus) >= 0) return g_srv.kb_focus;
     return list.empty() ? nullptr : list.front();
 }
 
 static void tile_focus_dir(int dx, int dy) {
-    std::vector<View *> list;
+    std::vector<void *> list;
     std::vector<sf::Rect> rects;
     if (!tile_current_rects(list, rects)) return;
-    View *from = tile_focused(list);
+    void *from = tile_focused(list);
     if (!from) return;
-    View *next = tile_neighbour(list, rects, from, dx, dy);
+    void *next = tile_neighbour(list, rects, from, dx, dy);
     if (!next) return;
-    g_tile_focus = next;
-    kb_set_focus(next);
-    tile_raise(next);
-    printf("[tile] focus '%s'\n", next->title[0] ? next->title : "view");
+    tile_focus_set(next);
+    if (View *v = tile_view(next)) tile_raise(v);
+    printf("[tile] focus '%s'\n", tile_name(next));
 }
 
 static void tile_swap_dir(int dx, int dy) {
-    std::vector<View *> list;
+    std::vector<void *> list;
     std::vector<sf::Rect> rects;
     if (!tile_current_rects(list, rects)) return;
-    View *from = tile_focused(list);
+    void *from = tile_focused(list);
     if (!from) return;
-    View *other = tile_neighbour(list, rects, from, dx, dy);
+    void *other = tile_neighbour(list, rects, from, dx, dy);
     if (!other) return;
     int ia = tile_index_of(g_tile_order, from);
     int ib = tile_index_of(g_tile_order, other);
     if (ia < 0 || ib < 0) return;
-    View *tmp = g_tile_order[ia];
+    void *tmp = g_tile_order[ia];
     g_tile_order[ia] = g_tile_order[ib];
     g_tile_order[ib] = tmp;
-    g_tile_focus = other;
-    kb_set_focus(other);
+    tile_focus_set(other);
     tile_sync();
-    printf("[tile] swap '%s' <-> '%s'\n",
-           from->title[0] ? from->title : "view", other->title[0] ? other->title : "view");
+    printf("[tile] swap '%s' <-> '%s'\n", tile_name(from), tile_name(other));
 }
 
 // ------------------------------------------------------------------ resize
 // Hyprland moves a boundary instead of re-laying the screen. The split the focused window
 // shares with its neighbour in the requested direction changes; no other window moves, so
 // nothing grows to fill a gap behind the user's back.
-static bool tile_resize_boundary(View *a, View *b, float delta) {
+static bool tile_resize_boundary(void *a, void *b, float delta) {
     const int ia = tile_index_of(g_tile_order, a);
     const int ib = tile_index_of(g_tile_order, b);
     if (ia < 0 || ib < 0) return false;
-    View *owner = ia < ib ? a : b;          // the window that opens the group owns the split
+    void *owner = ia < ib ? a : b;          // the window that opens the group owns the split
     const TileNode *node = tile_node_of(owner);
     if (!node) return false;
     const float before = node->ratio;
@@ -414,16 +455,15 @@ static bool tile_resize_boundary(View *a, View *b, float delta) {
     const float next = before + (owner == a ? delta : -delta);
     tile_split_set(owner, next);
     tile_sync();
-    printf("[tile] split '%s' %.2f -> %.2f\n", owner->title[0] ? owner->title : "view",
-           before, tile_split_of(owner));
+    printf("[tile] split '%s' %.2f -> %.2f\n", tile_name(owner), before, tile_split_of(owner));
     return true;
 }
 
 static bool tile_resize_dir(int dx, int dy, float delta) {
-    std::vector<View *> list;
+    std::vector<void *> list;
     std::vector<sf::Rect> rects;
     if (!tile_current_rects(list, rects)) return false;
-    View *v = tile_focused(list);
+    void *v = tile_focused(list);
     if (!v) return false;
     if (g_tile_layout == TILE_MASTER) {
         // The master column is a single global boundary; there is nothing local about it.
@@ -434,7 +474,7 @@ static bool tile_resize_dir(int dx, int dy, float delta) {
         tile_sync();
         return true;
     }
-    View *other = tile_neighbour(list, rects, v, dx, dy);
+    void *other = tile_neighbour(list, rects, v, dx, dy);
     if (!other) {
         printf("[tile] nothing to resize against on that side\n");
         return false;
@@ -445,10 +485,10 @@ static bool tile_resize_dir(int dx, int dy, float delta) {
 // A pinch on a managed window drags its boundary. Pixels are turned into a ratio through
 // the node's own extent, so the same finger travel means the same thing at any size.
 static bool tile_resize_pixels(int32_t px) {
-    std::vector<View *> list;
+    std::vector<void *> list;
     std::vector<sf::Rect> rects;
     if (!tile_current_rects(list, rects)) return false;
-    View *v = tile_focused(list);
+    void *v = tile_focused(list);
     if (!v) return false;
     const TileNode *node = tile_node_of(v);
     if (!node) {
@@ -460,7 +500,7 @@ static bool tile_resize_pixels(int32_t px) {
     const int32_t extent = node->vertical ? (node->rect.bottom - node->rect.top)
                                           : (node->rect.right - node->rect.left);
     if (extent < 1) return false;
-    View *owner = (View *)node->owner;
+    void *owner = node->owner;
     float delta = (float)px / (float)extent;
     if (owner != v) delta = -delta;
     tile_split_set(owner, node->ratio + delta);
@@ -480,8 +520,9 @@ static void tile_toggle() {
     // Leaving the tile mode must not leave the windows looking like tiles: the forced
     // logical size is cleared so the next configure no longer asks for it, and every
     // window keeps its current position and size as a normal floating window.
-    for (View *v : g_tile_order) {
-        if (!tile_candidate(v)) continue;
+    for (void *p : g_tile_order) {
+        View *v = tile_view(p);
+        if (!v || !tile_candidate(v)) continue;
         v->req_w = 0;
         v->req_h = 0;
         v->place();
@@ -501,11 +542,16 @@ static void tile_set_layout(const char *name) {
 }
 
 static void tile_toggle_float() {
-    std::vector<View *> list;
+    std::vector<void *> list;
     std::vector<sf::Rect> rects;
     if (!tile_current_rects(list, rects)) return;
-    View *v = tile_focused(list);
-    if (!v) return;
+    void *p = tile_focused(list);
+    if (!p) return;
+    View *v = tile_view(p);
+    if (!v) {
+        printf("[tile] '%s' floats in the shell, not here\n", tile_name(p));
+        return;
+    }
 
     if (tile_is_floating(v)) {
         for (size_t i = 0; i < g_tile_floating.size(); i++) {
@@ -524,11 +570,16 @@ static void tile_toggle_float() {
 }
 
 static void tile_toggle_fullscreen() {
-    std::vector<View *> list;
+    std::vector<void *> list;
     std::vector<sf::Rect> rects;
     if (!tile_current_rects(list, rects)) return;
-    View *v = tile_focused(list);
-    if (!v) return;
+    void *p = tile_focused(list);
+    if (!p) return;
+    View *v = tile_view(p);
+    if (!v) {
+        printf("[tile] '%s' is fullscreen only in the shell\n", tile_name(p));
+        return;
+    }
     v->want_fullscreen = !v->want_fullscreen;
     toplevel_send_configure(v);
     printf("[tile] fullscreen %s for '%s'\n", v->want_fullscreen ? "on" : "off",
@@ -552,6 +603,20 @@ static void tile_on_focus(View *v) {
     if (!g_tile_on || !v) return;
     if (!tile_candidate(v) || tile_is_floating(v)) return;
     g_tile_focus = v;
+}
+
+/**
+ * A press inside an Android window's tile focuses it. Such a window has no surface of its
+ * own, so hit testing cannot find it; the layout knows where it is.
+ */
+static bool tile_tap_focus(int32_t x, int32_t y) {
+    for (AppWin *a : g_apps) {
+        if (a->ws != g_ws_active || a->w <= 0 || a->h <= 0) continue;
+        if (x < a->x || y < a->y || x >= a->x + a->w || y >= a->y + a->h) continue;
+        if (g_tile_focus != (void *)a) tile_focus_set(a);
+        return true;
+    }
+    return false;
 }
 
 // Three-finger gesture: horizontal moves the focus, vertical swaps, a tap toggles float.

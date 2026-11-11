@@ -62,6 +62,18 @@ class OutputSurfaceFactory(private val context: Context) {
 
     fun displayIdOf(slot: Int): Int? = mounts[slot]?.display?.display?.displayId
 
+    /**
+     * The host window is not on screen right now. The display stays: releasing it would
+     * restart every application on it, and with the hosts as tasks any window coming to the
+     * front — the task switcher, a small window — hides them for a moment. Only the surface
+     * is dropped, so nothing is drawn while it is away.
+     */
+    fun detach(slot: Int) {
+        val mounted = mounts[slot] ?: return
+        runCatching { mounted.display.surface = null }
+        Logs.i("output $slot hidden, display kept")
+    }
+
     fun forget(slot: Int) {
         val mounted = mounts.remove(slot) ?: return
         runCatching { mounted.display.surface = null }

@@ -16,6 +16,7 @@ import android.os.Binder
 import android.os.Bundle
 import android.os.IBinder
 import android.os.Parcel
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.Surface
 import android.view.SurfaceHolder
@@ -115,6 +116,23 @@ class HostActivity : Activity(), SurfaceHolder.Callback {
             it.writeInt(action)
             it.writeFloat(x)
             it.writeFloat(y)
+        }
+        return true
+    }
+
+    /**
+     * The window is the only place a key for a hosted application can arrive: the key is
+     * addressed to the shell's window, and the application lives on another display. The
+     * event keeps its key code and meta state, so nothing is re-derived here.
+     */
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val action = event.action
+        val keyCode = event.keyCode
+        val metaState = event.metaState
+        send(HostLink.CODE_KEY) {
+            it.writeInt(action)
+            it.writeInt(keyCode)
+            it.writeInt(metaState)
         }
         return true
     }

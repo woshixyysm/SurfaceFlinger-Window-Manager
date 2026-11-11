@@ -492,6 +492,9 @@ static void handle_frame() {
                g_in.slots[g_primary_slot].x, g_in.slots[g_primary_slot].y, fx, fy,
                g_in.xmin, g_in.xmax, g_in.ymin, g_in.ymax);
         View *hv = hit_test(fx, fy);
+        // An Android window has no surface to hit, so the layout names it instead. Taking
+        // the focus here is what makes the keyboard follow the tile the finger chose.
+        tile_tap_focus(fx, fy);
         int corner = corner_hit(hv, fx, fy);
         // A corner press no longer resizes immediately: it is armed first and only starts
         // once the finger moves past the threshold.

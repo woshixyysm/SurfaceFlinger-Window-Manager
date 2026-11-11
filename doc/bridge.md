@@ -193,6 +193,30 @@ Where a task sits is the module's business, not the window's: `ActivityTaskManag
 only moves a task for a caller that may manage tasks, and only the forced resize modes apply
 (`RESIZE_MODE_USER_FORCED`, 5). The window only sizes its own content.
 
+## Tiling an Android window
+
+An Android window is a tile like any other. The layout order is one list of opaque entries —
+a `View` for a Wayland window, an `AppWin` for an Android one — so the same pass sizes both:
+a view gets `req_w`/`req_h` and a configure, an Android window gets a `place` line over the
+control socket. Focus, swapping and boundary drags work on that shared order, which is what
+lets an Android application sit next to a Wayland client instead of always trailing the list.
+
+Two pieces are asymmetric on purpose:
+
+- **Focus.** A Wayland client is handed the keyboard with `wl_keyboard.enter`. An Android
+  window cannot be: keys reach whichever window the shell considers focused, so focusing a
+  tile asks the module to raise that task (`focus <slot>`). Tapping a tile focuses it too —
+  such a window has no surface to hit test, so the layout names it by rectangle.
+- **Keys.** A key addressed to a hosted application arrives at the host window, which is the
+  shell's. `HostActivity.dispatchKeyEvent` hands it to the module, which re-injects it into
+  the hosted display with `setDisplayId`. The key code and meta state are the ones the
+  platform already resolved, so nothing is re-derived from a scan code.
+
+An output whose surface goes away — which is now routine, because any window coming to the
+front covers the hosts — keeps its display: only the surface is dropped, so the
+applications on it are not restarted and the tile comes back where it was.
+
+
 
 ## Input observation
 

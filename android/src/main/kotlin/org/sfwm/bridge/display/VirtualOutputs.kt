@@ -11,12 +11,14 @@ import android.app.ActivityOptions
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.os.Bundle
 import android.graphics.Rect
 import android.content.IntentFilter
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.view.Display
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.Surface
 import org.sfwm.bridge.BridgeLink
@@ -40,7 +42,15 @@ class VirtualOutputs(
     private val panels = PanelReader(context)
     private val displays = OutputSurfaceFactory(context)
     private val injector = TouchInjector()
-    private val stage = OutputStage(context, ::attach, ::detach, ::forwardTouch, ::resizeHostTask)
+    private val keyboard = KeyInjector()
+    private val stage = OutputStage(
+        context,
+        ::attach,
+        ::detach,
+        ::forwardTouch,
+        ::forwardKey,
+        ::resizeHostTask,
+    )
     private val slots = settings.outputs.coerceIn(0, MAX_SLOTS)
     private val requests = LinkedHashMap<Int, SlotRequest>()
     // What has already been started on which display, so a resize does not relaunch an app.
@@ -174,6 +184,65 @@ class VirtualOutputs(
         }
         lastSlot = slot
         injector.send(displayId, phase, x, y, id)
+    }
+
+    /** A key the host window received, on its way to the application behind [slot]. */
+    private fun forwardKey(slot: Int, action: Int, keyCode: Int, metaState: Int) {
+        val displayId = displays.displayIdOf(slot) ?: return
+        lastSlot = slot
+        keyboard.send(displayId, action, keyCode, metaState)
+    }
+
+    /**
+     * Brings a slot's task to the front. Android's own focus is what decides where a key
+     * goes, and an application on a hosted display is not a Wayland client this compositor
+     * could hand the keyboard to: raising its task is how the tile becomes the one typing
+     * goes to, exactly as clicking it in the shell would.
+     */
+    fun focus(slot: Int) {
+        val taskId = stage.taskIdOf(slot)
+        if (taskId <= 0) {
+            Logs.w("slot $slot has no task to focus")
+            return
+        }
+        val atm = atmService() ?: return
+        lastSlot = slot
+        var refusal: Throwable? = null
+        for (name in FRONT_METHODS) {
+            val done = runCatching {
+                atm.javaClass
+                    .getMethod(name, Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
+                    .invoke(atm, taskId, 0)
+                true
+            }.onFailure { refusal = it }.getOrDefault(false)
+            if (done) {
+                Logs.i("slot $slot focused (task $taskId via $name)")
+                return
+            }
+        }
+        // What the shell's own task switcher uses: it needs no task-management permission,
+        // which is why it is the fallback when the direct calls are refused.
+        val fromRecents = runCatching {
+            atm.javaClass
+                .getMethod("startActivityFromRecents", Int::class.javaPrimitiveType, Bundle::class.java)
+                .invoke(atm, taskId, null)
+            true
+        }.onFailure { refusal = it }.getOrDefault(false)
+        if (fromRecents) {
+            Logs.i("slot $slot focused (task $taskId via startActivityFromRecents)")
+            return
+        }
+        Logs.w("task $taskId could not be brought to the front", refusal)
+    }
+
+    /** Delivers one key, as the host window received it, to the display behind [slot]. */
+    fun key(slot: Int, code: Int, down: Boolean) {
+        val displayId = displays.displayIdOf(slot)
+        if (displayId == null) {
+            Logs.w("key for slot $slot dropped: the slot has no display")
+            return
+        }
+        keyboard.send(displayId, if (down) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP, code, 0)
     }
 
     // ----------------------------------------------------------- stray Android windows
@@ -442,8 +511,9 @@ class VirtualOutputs(
     }.getOrNull()
 
     private fun detach(slot: Int) {
-        BridgeReport.forgetOutput(slot)
-        publish()
+        // The window went away but the display does not have to: the application on it keeps
+        // running and the tile comes back the moment the window is on screen again.
+        displays.detach(slot)
     }
 
     private fun publish() {
@@ -523,6 +593,9 @@ class VirtualOutputs(
 
         /** `ActivityTaskManager.RESIZE_MODE_USER_FORCED`, then the weaker ones. */
         val RESIZE_MODES = intArrayOf(5, 4, 3, 1)
+
+        /** Bringing a task to the front: the name moved between releases, both are tried. */
+        val FRONT_METHODS = arrayOf("moveTaskToFront", "moveRootTaskToFront")
 
         /** `Display #5 (activities from top to bottom):` */
         val DISPLAY_HEADER = Regex("^Display #(\\d+) ")

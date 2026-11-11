@@ -18,6 +18,7 @@ object HostLink {
     const val CODE_SURFACE = 2
     const val CODE_SURFACE_GONE = 3
     const val CODE_TOUCH = 4
+    const val CODE_KEY = 5
 
     /** Module to window: the rectangle to occupy, and whether it is on screen. */
     const val CODE_PLACE = 10

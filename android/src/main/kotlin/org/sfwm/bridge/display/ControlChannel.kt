@@ -82,6 +82,11 @@ class ControlChannel(private val host: VirtualOutputs) {
                         host.touch(slot, phase, x, y, id)
                     else Logs.w("touch needs a slot, a phase and two coordinates")
                 }
+                "focus" -> {
+                    val slot = parts.getOrNull(1)?.toIntOrNull()
+                    if (slot != null) host.focus(slot) else Logs.w("focus needs a slot")
+                }
+
                 "status" -> host.publishNow()
                 else -> Logs.w("unknown control command '${parts[0]}'")
             }
