@@ -7,5 +7,17 @@
     <application
         android:label="@string/app_name"
         android:directBootAware="true"
-        android:allowBackup="false" />
+        android:allowBackup="false">
+
+        <!-- One hosted output is one task: an application-band window, so ordering against
+             the shell's own floating windows follows focus instead of window type. -->
+        <activity
+            android:name=".display.HostActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:resizeableActivity="true"
+            android:launchMode="standard"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode" />
+    </application>
 </manifest>
