@@ -389,6 +389,7 @@ static void kb_set_focus(View *v) {
         for (wl_resource *k : g_srv.keyboards) kb_send_enter_to(k, v);
     }
     dd_focus_changed(v);   // the new client receives the clipboard, the old one selection(NULL)
+    tile_on_focus(v);      // the tiling focus follows the keyboard focus
 }
 
 static void kb_key(uint32_t code, bool pressed) {
@@ -755,8 +756,13 @@ static void kb_command(const std::string &line, int fd) {
         for (View *v : g_srv.views) if (v->mapped) v->place();
         printf("[sfwm] layers restored\n");
     }
+    else if (line == "tile") {
+        tile_toggle();
+    } else if (line.compare(0, 5, "tile ") == 0) {
+        tile_command(line.substr(5));
+    }
     else if (line == "help") {
-        printf("[kbd] usage: t <text> | k <evdev> <0|1> | s <keysym> | m <x> <y> | c <x> <y> <0|1> | p <x> <y>\n");
+        printf("[kbd] usage: t <text> | k <evdev> <0|1> | s <keysym> | m <x> <y> | c <x> <y> <0|1> | p <x> <y> | tile ...\n");
     } else {
         kb_type_text(s);   // a bare line types text
     }

@@ -10,6 +10,8 @@ struct View;
 static void ftl_on_view_mapped(View *v);    // ext-foreign-toplevel-list
 static void ftl_on_view_changed(View *v);   // title or app_id changed
 static void ftlm_on_view_mapped(View *v);   // zwlr-foreign-toplevel-management
+// Defined after this header (compositor/tiling.hpp); a new window joins the tiling order.
+static void tile_sync();
 static void ftlm_on_view_changed(View *v);
 static void ws_assign_new(View *v);         // ext-workspace: join the active workspace
 static bool ws_visible(View *v);            // ext-workspace: visible in the active workspace
@@ -354,6 +356,7 @@ struct View {
         if (!is_subsurface && !is_cursor && !is_x_root && !is_layer) kb_set_focus(this);   // new window takes focus
         // Layer surfaces take focus only when they declare keyboard interactivity.
         if (is_layer && layer_kb != ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE) kb_set_focus(this);
+        tile_sync();   // the new window joins the layout, unless tiling is off
     }
 
     // Fit a newly mapped window into the output:

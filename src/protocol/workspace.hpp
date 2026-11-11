@@ -32,6 +32,10 @@
 static int g_ws_count  = 4;   // number of workspaces
 static int g_ws_active = 0;   // active workspace, zero based
 
+// Defined after this header (compositor/tiling.hpp): re-lay the windows of the workspace
+// that just became active.
+static void tile_sync();
+
 // Called from notify_mapped(): a new window joins the active workspace.
 static void ws_assign_new(View *v) { if (v) v->ws = g_ws_active; }
 
@@ -122,6 +126,7 @@ static void ws_activate(int idx) {
     printf("[ws] switch workspace %d -> %d\n", g_ws_active + 1, idx + 1);
     g_ws_active = idx;
     ws_apply_visibility();
+    tile_sync();       // the other workspace's windows are laid out now
     ws_broadcast();
 }
 

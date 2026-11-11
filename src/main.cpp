@@ -27,6 +27,9 @@
 #include "protocol/display_ctl.hpp"
 // Workspaces (ext_workspace_manager_v1); the data comes from g_srv.views and View::ws.
 #include "protocol/workspace.hpp"
+// Tiling layouts. Included after the workspace state it reads and before the input modules
+// that expose the tile commands and the three-finger gesture.
+#include "compositor/tiling.hpp"
 // Session lock (ext_session_lock_manager_v1), implemented by hiding SF layers.
 #include "protocol/session_lock.hpp"
 // ext_image_copy_capture_v1, reusing the screencopy backend for capture.

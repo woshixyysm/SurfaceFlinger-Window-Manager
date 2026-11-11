@@ -14,7 +14,7 @@
 //   OWNER_MOVE   window move after a 400 ms press, with anchoring and snapping
 //   OWNER_RESIZE resize started in a corner band, with the opposite corner fixed
 //   OWNER_NONE   idle
-enum TouchOwner { OWNER_NONE = 0, OWNER_CLIENT, OWNER_MOVE, OWNER_RESIZE, OWNER_PINCH };
+enum TouchOwner { OWNER_NONE = 0, OWNER_CLIENT, OWNER_MOVE, OWNER_RESIZE, OWNER_PINCH, OWNER_TILE };
 
 static TouchOwner g_owner = OWNER_NONE;
 static int touch_owner_value(void) { return (int)g_owner; }
@@ -38,6 +38,9 @@ static int32_t g_pinch_px = 0, g_pinch_py = 0;
 // and reading a live value makes the computed origin jump between two results.
 static int32_t g_pinch_sc = 1;
 static float   g_pinch_zoom0 = 1.f;   // zoom at gesture start, so successive pinches do not jump
+// Three-finger window-management gesture: where it started and where the fingers are now.
+static int32_t g_tile_swipe_x = 0, g_tile_swipe_y = 0;
+static int32_t g_tile_last_x = 0, g_tile_last_y = 0;
 
 static void idle_note_activity();   // ext-idle-notify, defined in idle_notify.hpp
 
@@ -195,6 +198,8 @@ static void handle_frame() {
                    v ? (v->title[0] ? v->title : "view") : "none",
                    v ? (v->bw / (v->buf_scale > 0 ? v->buf_scale : 1)) : 0,
                    v ? (v->bh / (v->buf_scale > 0 ? v->buf_scale : 1)) : 0);
+        } else if (g_owner == OWNER_TILE) {
+            tile_swipe_end(g_tile_swipe_x, g_tile_swipe_y, g_tile_last_x, g_tile_last_y);
         }
         // The client is only updated when the gesture ends; during it nothing is touched.
         // Hide the cursor on release so it cannot cover the next click.
@@ -338,6 +343,16 @@ static void handle_frame() {
             if ((dbgn++ & 15) == 0)
                 printf("[wm] pinch zoom=%.3f (distance %d to %d)\n", scale, g_pinch_d0, d);
         }
+        return;
+    }
+
+    // ---------- owner: TILE ----------
+    // Three fingers are the window-management gesture set: the swipe is evaluated when the
+    // fingers are released, so a wobbling finger does not move the focus around.
+    if (g_owner == OWNER_TILE) {
+        g_tile_last_x = fx;
+        g_tile_last_y = fy;
+        g_in.pending = 0;
         return;
     }
 
@@ -504,6 +519,19 @@ static void handle_frame() {
             g_arm_corner = 0;
             return;
         }
+    }
+
+    // Three fingers are the window-management gesture set, but only while tiling is on.
+    // With tiling off they fall through to the normal two-finger path, so the default
+    // window behaviour is exactly what it was.
+    if (g_tile_on && nf >= 3 && g_owner == OWNER_CLIENT && g_client_view) {
+        if (g_in.down) { g_in.down = false; input_button(false); }
+        sec_release_all();
+        g_owner = OWNER_TILE;
+        g_tile_swipe_x = fx; g_tile_swipe_y = fy;
+        g_tile_last_x = fx;  g_tile_last_y = fy;
+        printf("[tile] three fingers: swipe to focus or swap, tap to float\n");
+        return;
     }
 
     // Two fingers resize the window instead of going to the client.
