@@ -1,4 +1,5 @@
 build/
+android/libs/
 *.o
 *-protocol.h
 *-protocol.c

@@ -1,0 +1,10 @@
+id=sfwm-bridge
+name=sfwm 桥
+version=0.1.0
+versionCode=1
+author=sfwm
+description=为 sfwm 提供外挂式 Android 能力：输入法通道（按键/文字/键盘高度）与虚拟 display（多 output）。每个能力都可单独关闭，未启用时进程内不做任何事。
+minApiVersion=101
+targetApiVersion=102
+staticScope=true
+exceptionMode=protective

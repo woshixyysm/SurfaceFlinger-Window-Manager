@@ -48,6 +48,7 @@ src/
 protocols/                protocol XML vendored from wlroots and wayland-protocols
 build-aux/                protocol generation and the CI cross build
 tools/                    device-side helper scripts and the structure checker
+android/                  optional LSPosed bridge module (see android/README.md)
 deps/                     Termux headers and libraries for the CI cross build
 doc/                      usage reference and driver notes
 ```
@@ -285,7 +286,8 @@ gesture owner and the pointer position.
 - Single output, single seat, and no hardware cursor plane.
 - Windows are moved and resized with gestures owned by the compositor rather than by
   client decorations.
-- Screenshot and recording support runs `screencap` and copies the result, so it is not a
+- Screenshot and recording support streams `screencap` straight into the client shm
+  buffer, without a temporary file, but the pixels are still copied, so it is not a
   zero copy path.
 - Icons set through `xdg-toplevel-icon-v1` are accepted but not stored.
 

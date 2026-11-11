@@ -1,0 +1,67 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// The published state: what the bridge currently provides to sfwm.
+//
+// The snapshot is the wire format both the socket and the state file carry, so sfwm only
+// has to parse one thing. Events that are not state (typed text, key presses) never go
+// through here; they are sent as they happen and are not replayable.
+package org.sfwm.bridge
+
+import java.util.TreeMap
+
+data class OutputEntry(
+    val displayId: Int,
+    val layerStack: Int,
+    val placement: OutputPlacement,
+)
+
+object BridgeReport {
+    private const val VERSION = 1
+
+    private val outputs = TreeMap<Int, OutputEntry>()
+    private var imeOn = false
+    private var keyboardHeight = 0
+
+    @Synchronized
+    fun noteOutput(index: Int, displayId: Int, layerStack: Int, placement: OutputPlacement) {
+        outputs[index] = OutputEntry(displayId, layerStack, placement)
+    }
+
+    @Synchronized
+    fun forgetOutput(index: Int) {
+        outputs.remove(index)
+    }
+
+    @Synchronized
+    fun reset() {
+        outputs.clear()
+    }
+
+    @Synchronized
+    fun keyboardHeight(): Int = keyboardHeight
+
+    @Synchronized
+    fun keyboardShown(): Boolean = imeOn
+
+    /** Returns true when the state actually changed, so callers can skip a publish. */
+    @Synchronized
+    fun markKeyboard(on: Boolean, height: Int): Boolean {
+        val bounded = if (on) height.coerceAtLeast(0) else 0
+        if (on == imeOn && bounded == keyboardHeight) return false
+        imeOn = on
+        keyboardHeight = bounded
+        return true
+    }
+
+    @Synchronized
+    fun render(): List<String> {
+        val lines = ArrayList<String>(outputs.size + 2)
+        lines += "v $VERSION"
+        lines += "ime ${if (imeOn) 1 else 0} $keyboardHeight"
+        for ((index, output) in outputs) {
+            val placement = output.placement
+            lines += "display $index ${output.displayId} ${output.layerStack} " +
+                "${placement.width} ${placement.height} ${placement.densityDpi} ${placement.x} ${placement.y}"
+        }
+        return lines
+    }
+}
