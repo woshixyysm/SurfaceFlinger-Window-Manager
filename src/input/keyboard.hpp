@@ -325,8 +325,24 @@ static void ime_apply(int32_t h, bool on) {
         }
 }
 
-static int on_ime_tick(void *) {
-    // Keyboard top edge from a one-shot dumpsys file; height is the screen height minus it.
+// The Android keyguard is drawn by the shell over the whole display, so every Wayland
+// layer steps aside while it is up. Nothing is released: the layers stay alive and the
+// windows come back exactly as they were on unlock.
+static void app_lock_apply(bool locked) {
+    int n = 0;
+    for (View *v : g_srv.views) {
+        if (!v->mapped || !v->layer.win) continue;
+        // The keyguard must not be covered by anything; on unlock everything comes back
+        // except the input method, which shows itself again with the next inset change.
+        if (locked) v->layer.setVisible(false);
+        else if (!v->is_ime) v->layer.setVisible(true);
+        n++;
+    }
+    printf("[lock] keyguard %s, %d layer(s) %s\n", locked ? "up" : "gone", n,
+           locked ? "hidden" : "shown");
+}
+
+static int on_ime_tick(void *) {    // Keyboard top edge from a one-shot dumpsys file; height is the screen height minus it.
     // The app state file is no longer read: its values are relative to the window and
     // would fight with the value computed here.
     if (g_ime_on) {

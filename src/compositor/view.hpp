@@ -12,6 +12,7 @@ static void ftl_on_view_changed(View *v);   // title or app_id changed
 static void ftlm_on_view_mapped(View *v);   // zwlr-foreign-toplevel-management
 // Defined after this header (compositor/tiling.hpp); a new window joins the tiling order.
 static void tile_sync();
+static bool app_locked_now();   // compositor/appwin.hpp: the Android keyguard is up
 static void ftlm_on_view_changed(View *v);
 static void ws_assign_new(View *v);         // ext-workspace: join the active workspace
 static bool ws_visible(View *v);            // ext-workspace: visible in the active workspace
@@ -357,6 +358,8 @@ struct View {
         // Layer surfaces take focus only when they declare keyboard interactivity.
         if (is_layer && layer_kb != ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE) kb_set_focus(this);
         tile_sync();   // the new window joins the layout, unless tiling is off
+        // A window that maps while the keyguard is up must not appear in front of it.
+        if (app_locked_now() && layer.win) layer.setVisible(false);
     }
 
     // Fit a newly mapped window into the output:

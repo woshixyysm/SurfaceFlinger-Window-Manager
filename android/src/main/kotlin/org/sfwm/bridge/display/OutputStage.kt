@@ -104,6 +104,18 @@ class OutputStage(
         Logs.i("output $slot removed from screen")
     }
 
+    /**
+     * Hides or shows every window at once. The lock screen owns the display while it is up,
+     * and an overlay would otherwise keep showing the application above it.
+     */
+    fun setVisible(visible: Boolean) {
+        for (frame in frames.values) {
+            frame.root.visibility =
+                if (visible) android.view.View.VISIBLE else android.view.View.INVISIBLE
+        }
+        Logs.i("output windows ${if (visible) "shown" else "hidden"}")
+    }
+
     fun unmountAll() {
         frames.keys.toList().forEach(::unmount)
     }

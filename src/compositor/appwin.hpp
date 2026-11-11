@@ -13,6 +13,7 @@
 #pragma once
 
 static void tile_sync();   // compositor/tiling.hpp
+static void app_lock_apply(bool locked);   // input/keyboard.hpp: hides the layers
 
 struct AppWin {
     int32_t slot = 0;       // slot in the bridge, also the window's identity
@@ -26,6 +27,9 @@ struct AppWin {
 
 static std::vector<AppWin *> g_apps;
 static wl_event_source *g_app_timer = nullptr;
+static bool g_app_locked = false;   // the Android keyguard is up
+
+static bool app_locked_now() { return g_app_locked; }
 
 // Published state and control socket. Both are configurable, because the shell process
 // that hosts the windows is not always SystemUI.
@@ -107,6 +111,18 @@ static void appwin_poll() {
     bool changed = false;
     char buf[512];
     while (fgets(buf, sizeof(buf), f)) {
+        // The lock screen is the shell drawing over everything. While it is up the bridge
+        // hides the hosted windows and sfwm hides its own layers, so nothing of the session
+        // is visible behind the keyguard.
+        int lockState = -1, panelHeight = 0;
+        if (sscanf(buf, "lock %d %d", &lockState, &panelHeight) >= 1 && lockState >= 0) {
+            const bool locked = lockState != 0;
+            if (locked != g_app_locked) {
+                g_app_locked = locked;
+                app_lock_apply(locked);
+            }
+            continue;
+        }
         int slot = -1, display = -1, stack = -1, w = 0, h = 0, dpi = 0, x = 0, y = 0;
         char pkg[128] = {0};
         const int n = sscanf(buf, "display %d %d %d %d %d %d %d %d %127s",
@@ -176,8 +192,33 @@ static void appwin_close(int32_t slot) {
     if (appwin_send(line)) printf("[app] %s\n", line);
 }
 
-static void appwin_list() {
-    if (g_apps.empty()) {
+// ------------------------------------------------------------------ touch
+// The window is above the Wayland layers, so a touch that lands in its rectangle is the
+// module's, not the compositor's: it is forwarded in the hosted display's own pixels.
+static AppWin *appwin_at(int32_t x, int32_t y) {
+    for (AppWin *a : g_apps) {
+        if (a->w <= 0 || a->h <= 0) continue;
+        if (x < a->x || x >= a->x + a->w) continue;
+        if (y < a->y || y >= a->y + a->h) continue;
+        return a;
+    }
+    return nullptr;
+}
+
+static void appwin_touch(AppWin *a, const char *phase, int32_t sx, int32_t sy) {
+    if (!a) return;
+    char line[128];
+    snprintf(line, sizeof(line), "touch %d %s %d %d", a->slot, phase, sx - a->x, sy - a->y);
+    appwin_send(line);
+}
+
+// A window can disappear between two touch events, so the pointer is checked first.
+static bool appwin_alive(AppWin *a) {
+    for (AppWin *o : g_apps) if (o == a) return true;
+    return false;
+}
+
+static void appwin_list() {    if (g_apps.empty()) {
         printf("[app] no Android window; 'app open <slot> <package|home>' starts one\n");
         return;
     }

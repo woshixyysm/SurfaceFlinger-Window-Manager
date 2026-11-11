@@ -37,6 +37,7 @@ class VirtualOutputs(
 ) {
     private val panels = PanelReader(context)
     private val displays = OutputSurfaceFactory(context)
+    private val injector = TouchInjector()
     private val stage = OutputStage(context, ::attach, ::detach)
     private val slots = settings.outputs.coerceIn(0, MAX_SLOTS)
     private val requests = LinkedHashMap<Int, SlotRequest>()
@@ -46,6 +47,7 @@ class VirtualOutputs(
     private var panel: PanelMetrics = FALLBACK_PANEL
     private var running = false
     private var panelWatcher: BroadcastReceiver? = null
+    private var keyguard: KeyguardWatcher? = null
 
     fun start() {
         if (running) return
@@ -58,6 +60,7 @@ class VirtualOutputs(
             stage.mount(slot, placementOf(slot))
         }
         watchPanel()
+        watchKeyguard()
         Logs.i(
             "outputs started: $slots slot(s), channel=${settings.channel}, " +
                 "panel=${panel.width}x${panel.height}@${panel.densityDpi}",
@@ -67,6 +70,8 @@ class VirtualOutputs(
     fun stop() {
         if (!running) return
         running = false
+        keyguard?.stop()
+        keyguard = null
         unwatchPanel()
         stage.unmountAll()
         displays.forgetAll()
@@ -127,7 +132,24 @@ class VirtualOutputs(
         Logs.i("app slot $slot closed")
     }
 
+    /**
+     * Overlay windows are ordered by the order they were added and cannot be reordered
+     * without recreating the surface the display renders into, so the stack is fixed:
+     * system windows (shade, control centre, input method, floating small windows) are
+     * above every hosted window. The layout keeps the hosted windows from overlapping,
+     * which is what makes the fixed order harmless.
+     */
     fun publishNow() = publish()
+
+    /** Delivers one touch event to the display behind [slot], in that display's pixels. */
+    fun touch(slot: Int, phase: String, x: Float, y: Float, id: Int) {
+        val displayId = displays.displayIdOf(slot)
+        if (displayId == null) {
+            Logs.w("touch for slot $slot dropped: the slot has no display")
+            return
+        }
+        injector.send(displayId, phase, x, y, id)
+    }
 
     private fun placementOf(slot: Int): OutputPlacement = settings.placement(slot, panel)
 
@@ -216,6 +238,22 @@ class VirtualOutputs(
         val receiver = panelWatcher ?: return
         panelWatcher = null
         runCatching { context.unregisterReceiver(receiver) }
+    }
+
+    /**
+     * The lock screen is drawn by the shell, not by this compositor, so the hosted windows
+     * step aside while it is up and come back untouched afterwards: the displays and the
+     * applications keep running, only visibility changes.
+     */
+    private fun watchKeyguard() {
+        if (keyguard != null) return
+        val watcher = KeyguardWatcher(context) { locked ->
+            stage.setVisible(!locked)
+            BridgeReport.markLocked(locked, panel.height)
+            publish()
+        }
+        keyguard = watcher
+        watcher.start()
     }
 
     /**

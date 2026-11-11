@@ -22,6 +22,18 @@ object BridgeReport {
     private val outputs = TreeMap<Int, OutputEntry>()
     private var imeOn = false
     private var keyboardHeight = 0
+    private var locked = false
+    private var panelHeight = 0
+
+    /** The lock screen owns the display while it is up; the compositor hides its own layers. */
+    @Synchronized
+    fun markLocked(on: Boolean, height: Int) {
+        locked = on
+        panelHeight = height
+    }
+
+    @Synchronized
+    fun isLocked(): Boolean = locked
 
     @Synchronized
     fun noteOutput(
@@ -65,6 +77,7 @@ object BridgeReport {
         val lines = ArrayList<String>(outputs.size + 2)
         lines += "v $VERSION"
         lines += "ime ${if (imeOn) 1 else 0} $keyboardHeight"
+        lines += "lock ${if (locked) 1 else 0} $panelHeight"
         for ((index, output) in outputs) {
             val placement = output.placement
             // The last field is the hosted package: a reader that only knows the geometry

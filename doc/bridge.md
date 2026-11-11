@@ -73,8 +73,13 @@ socket in one connection, or written atomically to a state file:
 ```
 v 1
 ime <0|1> <height>
+lock <0|1> <panelHeight>
 display <index> <displayId> <layerStack> <w> <h> <dpi> <x> <y> <package>
 ```
+
+`lock 1` means the Android keyguard or a dark screen owns the display: the module hides its
+windows and the compositor hides its own layers, so nothing of the session shows above the
+lock screen. Nothing is released — the applications and their displays keep running.
 
 The last field is `-` for a plain output, `home` for a window hosting the shell, and a
 package name otherwise. A reader that only knows the geometry can stop before it.
@@ -110,8 +115,23 @@ line, several per connection:
 place <slot> <x> <y> <w> <h>   move and resize the window, density unchanged
 open  <slot> <package|home>    start an application on that slot's display
 close <slot>                   release the window and its display
+touch <slot> <phase> <x> <y>   forward one contact, in the display's own pixels
 status                         republish the snapshot
 ```
+
+Touch is forwarded, not relayed: the compositor reads `/dev/input` itself and knows which
+tile a finger landed in, while the window sits above its layers on the default display, so
+the app would otherwise never see the event. `phase` is `down`, `move`, `up` or `cancel`;
+the coordinates are relative to the tile. They are delivered with
+`InputManager.injectInputEvent` after `MotionEvent.setDisplayId` (hidden, called
+reflectively), which is what points the event at the hosted display.
+
+Layer order is fixed by construction. A hosted window is an overlay of the default display,
+so the shade, the control centre, the input method and floating small windows — all system
+windows — are above it, and cannot be reordered without recreating the surface the display
+renders into. The layout keeps the hosted windows from overlapping, which is what makes the
+fixed order harmless; a window that should really interleave with the Wayland layers would
+have to be composited by the compositor itself instead of hosted by the shell.
 
 A placement resizes the virtual display and moves the overlay window, in that order, so the
 application never sees a window larger than its display. The density is pinned to the
