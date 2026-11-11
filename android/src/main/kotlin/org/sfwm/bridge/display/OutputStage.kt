@@ -32,7 +32,6 @@ class OutputStage(
     private val surfaceGoneSink: (slot: Int) -> Unit,
     private val touchSink: (slot: Int, action: Int, x: Float, y: Float) -> Unit,
     private val keySink: (slot: Int, action: Int, keyCode: Int, metaState: Int) -> Unit,
-    private val resizeSink: (taskId: Int, placement: OutputPlacement) -> Boolean,
 ) {
     private val placements = HashMap<Int, OutputPlacement>()
     private val endpoints = HashMap<Int, Endpoint>()
@@ -88,6 +87,18 @@ class OutputStage(
                     onMain { keySink(slot, action, keyCode, metaState) }
                     return true
                 }
+                HostLink.CODE_GONE -> {
+                    // The window is gone but its binder is not: the peer is dropped here, so
+                    // the slot looks unmounted and the sweep starts a new window.
+                    peer = null
+                    taskId = -1
+                    onMain {
+                        surfaces.remove(slot)
+                        surfaceGoneSink(slot)
+                    }
+                    Logs.i("output $slot window is gone")
+                    return true
+                }
             }
             return super.onTransact(code, data, reply, flags)
         }
@@ -103,15 +114,26 @@ class OutputStage(
 
     fun mount(slot: Int, placement: OutputPlacement): Boolean {
         placements[slot] = placement
-        if (endpoints[slot] != null) {
+        // What matters is a live window, not an endpoint: an endpoint whose window never
+        // started would otherwise make every later attempt a silent no-op, and the slot could
+        // never come back.
+        if (isMounted(slot)) {
             reshape(slot, placement)
             return true
         }
+        endpoints.remove(slot)
         return start(slot, placement)
     }
 
     fun reshape(slot: Int, placement: OutputPlacement) {
         placements[slot] = placement
+        val endpoint = endpoints[slot]
+        if (endpoint == null || endpoint.peer == null) {
+            // A placement is also the first moment a start can be attempted again: the shell
+            // refuses to create the task while it has nothing of its own in front.
+            mount(slot, placement)
+            return
+        }
         applyPlace(slot, placement)
     }
 
@@ -144,9 +166,7 @@ class OutputStage(
 
     /** Moves a window: the task bounds are the placement, and the window is told as well. */
     private fun applyPlace(slot: Int, placement: OutputPlacement) {
-        val endpoint = endpoints[slot] ?: return
-        if (endpoint.taskId > 0) resizeSink(endpoint.taskId, placement)
-        val peer = endpoint.peer ?: return
+        val peer = endpoints[slot]?.peer ?: return
         transact(peer, HostLink.CODE_PLACE) {
             it.writeInt(placement.x)
             it.writeInt(placement.y)
@@ -196,11 +216,12 @@ class OutputStage(
         // window needs a binder, not a serialised copy of one.
         intent.putExtras(Bundle().apply { putBinder(HostLink.EXTRA_CALLBACK, endpoint) })
         val options = ActivityOptions.makeBasic()
-        launchWindowingMode(options, WINDOWING_MODE_FREEFORM)
-        launchBounds(options, placement)
-        freeformCaptions(options)
+        // A fullscreen task carries no shell decoration, which is the point: the caption a
+        // freeform task is given would sit inside the tile. The window is transparent and the
+        // surface view is placed at the tile rectangle instead.
+        launchWindowingMode(options, WINDOWING_MODE_FULLSCREEN)
         context.startActivity(intent, options.toBundle())
-        Logs.i("output $slot started as a freeform task at ${placement.x},${placement.y}")
+        Logs.i("output $slot host task started, tile ${placement.width}x${placement.height}")
         true
     }.getOrElse { throwable ->
         endpoints.remove(slot)
@@ -214,33 +235,9 @@ class OutputStage(
             .invoke(options, mode)
     }.onFailure { Logs.w("setLaunchWindowingMode unavailable", it) }
 
-    private fun launchBounds(options: ActivityOptions, placement: OutputPlacement) = runCatching {
-        val bounds = Rect(
-            placement.x,
-            placement.y,
-            placement.x + placement.width,
-            placement.y + placement.height,
-        )
-        ActivityOptions::class.java.getMethod("setLaunchBounds", Rect::class.java)
-            .invoke(options, bounds)
-    }.onFailure { Logs.w("setLaunchBounds unavailable", it) }
-
-    /**
-     * A freeform task is drawn with the shell's own caption — back, minimise, maximise,
-     * close — which is decoration a hosted tile does not want: the compositor is the window
-     * manager here. The switch is hidden, so it is asked for reflectively and its absence is
-     * not fatal: the tile simply keeps the caption.
-     */
-    private fun freeformCaptions(options: ActivityOptions) = runCatching {
-        ActivityOptions::class.java
-            .getMethod("setFreeformCaptionsEnabled", Boolean::class.javaPrimitiveType)
-            .invoke(options, false)
-        Logs.i("host window asked for no captions")
-    }.onFailure { Logs.w("setFreeformCaptionsEnabled unavailable, the tile keeps its caption", it) }
-
     private companion object {
-        /** `WindowConfiguration.WINDOWING_MODE_FREEFORM`. */
-        const val WINDOWING_MODE_FREEFORM = 5
+        /** `WindowConfiguration.WINDOWING_MODE_FULLSCREEN`: a fullscreen task has no caption. */
+        const val WINDOWING_MODE_FULLSCREEN = 1
 
         /** Ours, not the shell's: the module's context belongs to the shell process. */
         const val HOST_PACKAGE = "org.sfwm.bridge"

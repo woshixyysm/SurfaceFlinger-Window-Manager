@@ -15,9 +15,11 @@ import android.app.Activity
 import android.os.Binder
 import android.os.Bundle
 import android.os.IBinder
+import android.graphics.PixelFormat
 import android.os.Parcel
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.widget.FrameLayout
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -70,12 +72,23 @@ class HostActivity : Activity(), SurfaceHolder.Callback {
             return
         }
         actionBar?.hide()
+        // A fullscreen task: no caption, and the tile is a surface view inside it. Everything
+        // the tile does not cover has to be see-through, or the task would hide the others.
         window.setBackgroundDrawable(null)
-        window.addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN)
+        window.addFlags(
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+        )
+        window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+        window.setFormat(PixelFormat.TRANSLUCENT)
         val surfaceView = SurfaceView(this)
         surfaceView.holder.addCallback(this)
+        surfaceView.setZOrderMediaOverlay(true)
         view = surfaceView
-        setContentView(surfaceView)
+        val root = FrameLayout(this)
+        root.addView(surfaceView, FrameLayout.LayoutParams(1, 1))
+        setContentView(root)
         send(HostLink.CODE_HELLO) {
             it.writeStrongBinder(endpoint)
             it.writeInt(taskId)
@@ -84,6 +97,9 @@ class HostActivity : Activity(), SurfaceHolder.Callback {
     }
 
     override fun onDestroy() {
+        // The binder belongs to the process, not to this window, so it staying alive says
+        // nothing about the window still being there: the module is told explicitly.
+        send(HostLink.CODE_GONE) { }
         caller = null
         Logs.i("output $slot task finished")
         super.onDestroy()
@@ -94,8 +110,19 @@ class HostActivity : Activity(), SurfaceHolder.Callback {
      * task can only be moved by a caller that may manage tasks.
      */
     private fun place(placement: OutputPlacement) {
-        runCatching { window.setLayout(placement.width, placement.height) }
-        Logs.i("output $slot window ${placement.width}x${placement.height} at ${placement.x},${placement.y}")
+        val surfaceView = view ?: return
+        val params = surfaceView.layoutParams as? FrameLayout.LayoutParams ?: return
+        if (params.width == placement.width && params.height == placement.height &&
+            params.leftMargin == placement.x && params.topMargin == placement.y
+        ) {
+            return
+        }
+        params.width = placement.width
+        params.height = placement.height
+        params.leftMargin = placement.x
+        params.topMargin = placement.y
+        surfaceView.layoutParams = params
+        Logs.i("output $slot tile at ${placement.x},${placement.y} ${placement.width}x${placement.height}")
     }
 
     /** Keeps the surface alive: an invisible view would destroy it and restart the display. */

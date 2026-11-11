@@ -141,6 +141,9 @@ struct View {
     // buffer pixels per logical pixel of this surface
     int sscale() const { return frac_scale > buf_scale ? frac_scale : buf_scale; }
     bool is_cursor = false;
+    // Set once the cursor's layer has been pushed out of input handling (Android 12+ occludes
+    // touches under an untrusted overlay even when its own input region is empty).
+    bool input_transparent = false;
     bool is_popup = false;
     bool is_ime = false;        // input method: always on top, hidden when inactive
 
@@ -228,7 +231,11 @@ struct View {
         layer.place(x, y - shift, zz);
     // Windows are opaque: skip alpha blending and hide unstable client alpha.
         if (!is_cursor && !is_layer && !is_subsurface) layer.setOpaque(true);
-        layer.setTouchable(!g_clickthrough);
+        // A cursor is drawn for the pointer and never takes part in input: leaving it
+        // touchable makes the shell swallow taps that land under it, which looks like a tile
+        // that cannot be touched whenever the pointer happens to rest on it.
+        layer.setTouchable(!g_clickthrough && !is_cursor);
+        if (is_cursor && !input_transparent) input_transparent = layer.makeInputTransparent();
         if (x != last_x || y != last_y || zz != last_z) {
             trace("W place '%s' %p (%d,%d)->(%d,%d) z=%d buf=%dx%d scale=%d reason=%s",
                   title[0] ? title : (app_id[0] ? app_id : "view"), (void *)this,

@@ -12,12 +12,12 @@
         <!-- One hosted output is one task: an application-band window, so ordering against
              the shell's own floating windows follows focus instead of window type.
              The module runs inside the shell's process, so the start does not come from our
-             own uid: the activity has to be exported, and the shell's signature permission is
-             what keeps every other application out. -->
+             own uid: the activity has to be exported. It holds nothing but an empty surface,
+             and a window it creates is a plain task, so the exposure is only that another
+             application could open a blank task. -->
         <activity
             android:name=".display.HostActivity"
             android:exported="true"
-            android:permission="android.permission.STATUS_BAR_SERVICE"
             android:excludeFromRecents="true"
             android:resizeableActivity="true"
             android:launchMode="standard"

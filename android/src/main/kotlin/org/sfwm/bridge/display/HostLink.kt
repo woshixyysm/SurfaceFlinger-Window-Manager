@@ -19,6 +19,8 @@ object HostLink {
     const val CODE_SURFACE_GONE = 3
     const val CODE_TOUCH = 4
     const val CODE_KEY = 5
+    /** The window is going away. The binder outlives it, so this is the only signal. */
+    const val CODE_GONE = 6
 
     /** Module to window: the rectangle to occupy, and whether it is on screen. */
     const val CODE_PLACE = 10

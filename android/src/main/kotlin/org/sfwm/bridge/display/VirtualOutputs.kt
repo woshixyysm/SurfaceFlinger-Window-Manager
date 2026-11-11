@@ -12,6 +12,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.os.SystemClock
 import android.graphics.Rect
 import android.content.IntentFilter
 import android.os.Build
@@ -49,7 +50,6 @@ class VirtualOutputs(
         ::detach,
         ::forwardTouch,
         ::forwardKey,
-        ::resizeHostTask,
     )
     private val slots = settings.outputs.coerceIn(0, MAX_SLOTS)
     private val requests = LinkedHashMap<Int, SlotRequest>()
@@ -63,6 +63,7 @@ class VirtualOutputs(
     private var sweep: Runnable? = null
     private var lastSlot = 0
     private val movedTasks = HashSet<Int>()
+    private val attempts = HashMap<Int, Long>()   // last time a lost window was restarted
 
     fun start() {
         if (running) return
@@ -259,6 +260,10 @@ class VirtualOutputs(
             override fun run() {
                 if (!running) return
                 restartMissingWindows()
+                // The snapshot goes to someone else's disk, and a cached "already sent" must
+                // not keep it from being written again after the file was lost.
+                BridgeLink.republish()
+                publish()
                 Thread { runCatching { sweepDefaultDisplay() }.onFailure { Logs.w("sweep failed", it) } }
                     .start()
                 handler.postDelayed(this, SWEEP_INTERVAL_MS)
@@ -271,11 +276,16 @@ class VirtualOutputs(
     /**
      * A slot whose window went away — the shell finishing it, a crash, a low-memory kill —
      * is started again. Without this the display would keep running with nothing on screen
-     * and the tile would be unreachable.
+     * and the tile would be unreachable. The retry is spaced out, so a window that cannot be
+     * created does not turn into a start/finish loop.
      */
     private fun restartMissingWindows() {
+        val now = SystemClock.uptimeMillis()
         for ((slot, request) in requests.entries.toList()) {
             if (!running || stage.isMounted(slot)) continue
+            val last = attempts[slot] ?: 0L
+            if (now - last < RETRY_INTERVAL_MS) continue
+            attempts[slot] = now
             Logs.i("slot $slot lost its window, starting it again")
             stage.mount(slot, request.placement)
         }
@@ -361,38 +371,6 @@ class VirtualOutputs(
         }.onFailure { Logs.w("moveRootTaskToDisplay($taskId, $displayId) failed", it) }.getOrDefault(false)
     }
 
-    /**
-     * Places a host window's task. The window cannot do this itself: `resizeTask` only moves a
-     * task for a caller that may manage tasks, and only the forced modes actually apply, which
-     * is why the ladder starts at the user-forced one.
-     */
-    private fun resizeHostTask(taskId: Int, placement: OutputPlacement): Boolean {
-        val atm = atmService() ?: return false
-        val method = runCatching {
-            atm.javaClass.getMethod(
-                "resizeTask",
-                Int::class.javaPrimitiveType,
-                Rect::class.java,
-                Int::class.javaPrimitiveType,
-            )
-        }.getOrNull() ?: return false
-        val bounds = Rect(
-            placement.x,
-            placement.y,
-            placement.x + placement.width,
-            placement.y + placement.height,
-        )
-        for (mode in RESIZE_MODES) {
-            val done = runCatching {
-                method.invoke(atm, taskId, bounds, mode)
-                true
-            }.getOrDefault(false)
-            if (done) return true
-        }
-        Logs.w("task $taskId refused the placement ${bounds.flattenToString()}")
-        return false
-    }
-
     private fun placementOf(slot: Int): OutputPlacement = settings.placement(slot, panel)
 
     private fun attach(slot: Int, surface: Surface) {
@@ -423,10 +401,19 @@ class VirtualOutputs(
         // HOME is a single-task activity on this build, so asking for it again delivers the
         // intent to the task already on the default display and the hosted display stays
         // empty. Moving the existing task is the only way to get a real launcher window.
-        if (packageName == HOME && moveHomeTo(displayId)) {
-            launched[slot] = key
-            Logs.i("moved the launcher to display $displayId")
-            return
+        if (packageName == HOME) {
+            if (moveHomeTo(displayId)) {
+                launched[slot] = key
+                Logs.i("moved the launcher to display $displayId")
+                return
+            }
+            // Launching HOME when the shell already has a home root task only produces a
+            // second one, which the platform then refuses to move. Better an empty tile that
+            // is retried than a pile of duplicate launchers.
+            if (homeRoots(atmService()).isNotEmpty()) {
+                Logs.w("a home task exists but would not move to display $displayId")
+                return
+            }
         }
         val intent = if (packageName == HOME) {
             Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
@@ -458,18 +445,24 @@ class VirtualOutputs(
     }
 
     /**
-     * Moves the home root task onto [displayId] and reports whether it moved. Both calls are
-     * hidden API and need a system permission, but this module runs inside the shell (uid
-     * 1000) and the platform grants signature permissions to the system uid, so a reflective
-     * call is enough.
+     * Moves the home root task onto [displayId] and reports whether it is there. The call is
+     * hidden API and needs a system permission, but this module runs inside the shell (uid
+     * 1000) and the platform grants signature permissions to the system uid.
+     *
+     * It is idempotent, which matters because a retry runs it again: asking for a second home
+     * root task on a display that already has one is refused, and a launch on top of that
+     * would leave duplicates behind.
      */
     private fun moveHomeTo(displayId: Int): Boolean {
         val atm = atmService()
-        val taskId = homeRootTaskId(atm)
-        if (taskId == null) {
+        val homes = homeRoots(atm)
+        if (homes.isEmpty()) {
             Logs.w("no home root task to move")
             return false
         }
+        if (homes.any { it.second == displayId }) return true
+        val source = homes.firstOrNull { it.second == DEFAULT_DISPLAY } ?: homes.first()
+        val taskId = source.first
         val moved = runCatching {
             atm?.javaClass
                 ?.getMethod("moveRootTaskToDisplay", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
@@ -491,6 +484,18 @@ class VirtualOutputs(
         Logs.i("moved home root task $taskId to display $displayId with am")
         return true
     }
+
+    /** The home root tasks, as (task id, display) pairs. */
+    private fun homeRoots(atm: Any?): List<Pair<Int, Int>> = runCatching {
+        val roots = atm?.javaClass?.getMethod("getAllRootTaskInfos")?.invoke(atm) as? List<*> ?: return emptyList()
+        roots.filterIsInstance<Any>()
+            .filter { intOf(it, "activityType") == ACTIVITY_TYPE_HOME }
+            .mapNotNull { root ->
+                val id = intOf(root, "taskId") ?: return@mapNotNull null
+                val display = intOf(root, "displayId") ?: DEFAULT_DISPLAY
+                id to display
+            }
+    }.onFailure { Logs.w("could not read the root task list", it) }.getOrDefault(emptyList())
 
     private fun atmService(): Any? = runCatching {
         Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null)
@@ -605,8 +610,8 @@ class VirtualOutputs(
         /** A `dumpsys` per sweep is cheap enough at this rate and needs no hidden API. */
         const val SWEEP_INTERVAL_MS = 3000L
 
-        /** `ActivityTaskManager.RESIZE_MODE_USER_FORCED`, then the weaker ones. */
-        val RESIZE_MODES = intArrayOf(5, 4, 3, 1)
+        /** How long a slot whose window went away waits before it is started again. */
+        const val RETRY_INTERVAL_MS = 15000L
 
         /** Bringing a task to the front: the name moved between releases, both are tried. */
         val FRONT_METHODS = arrayOf("moveTaskToFront", "moveRootTaskToFront")

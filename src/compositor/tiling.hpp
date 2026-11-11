@@ -18,6 +18,8 @@ static void    kb_set_focus(View *v);
 static int32_t client_scale(View *v);
 static void    toplevel_send_configure(View *v);
 static void    tile_focus_set(void *p);
+static AppWin *tile_app_at(int32_t x, int32_t y);
+static void   *tile_at_point(int32_t x, int32_t y);
 
 // ------------------------------------------------------------------ state
 enum TileLayout { TILE_DWINDLE = 0, TILE_MASTER = 1 };
@@ -613,13 +615,11 @@ static void tile_on_focus(View *v) {
  * own, so hit testing cannot find it; the layout knows where it is.
  */
 static bool tile_tap_focus(int32_t x, int32_t y) {
-    for (AppWin *a : g_apps) {
-        if (a->ws != g_ws_active || a->w <= 0 || a->h <= 0) continue;
-        if (x < a->x || y < a->y || x >= a->x + a->w || y >= a->y + a->h) continue;
-        if (g_tile_focus != (void *)a) tile_focus_set(a);
-        return true;
-    }
-    return false;
+    AppWin *a = tile_app_at(x, y);
+    if (!a && g_tile_on) a = tile_app(tile_at_point(x, y));
+    if (!a) return false;
+    if (g_tile_focus != (void *)a) tile_focus_set(a);
+    return true;
 }
 
 /** The Android window under a point, or null: the same search the tap focus does. */
@@ -628,6 +628,24 @@ static AppWin *tile_app_at(int32_t x, int32_t y) {
         if (a->ws != g_ws_active || a->w <= 0 || a->h <= 0) continue;
         if (x < a->x || y < a->y || x >= a->x + a->w || y >= a->y + a->h) continue;
         return a;
+    }
+    return nullptr;
+}
+
+/**
+ * The tile a screen point belongs to, as the layout last placed it. This is what a press
+ * must be resolved against: a client that has not resized yet still reports its old, larger
+ * geometry, and hit testing against that would hand it touches that belong to the tile next
+ * to it.
+ */
+static void *tile_at_point(int32_t x, int32_t y) {
+    std::vector<void *> list;
+    std::vector<sf::Rect> rects;
+    if (!g_tile_on || !tile_current_rects(list, rects)) return nullptr;
+    for (size_t i = 0; i < list.size() && i < rects.size(); i++) {
+        const sf::Rect &r = rects[i];
+        if (x < r.left || y < r.top || x >= r.right || y >= r.bottom) continue;
+        return list[i];
     }
     return nullptr;
 }

@@ -39,6 +39,15 @@ object BridgeLink {
     }
 
     /**
+     * Forgets what was published, so the next report is sent even if it is unchanged. The
+     * file is a fallback on someone else's disk: it can be deleted or replaced between two
+     * updates, and a cached snapshot would then never come back.
+     */
+    fun republish() {
+        synchronized(this) { lastState = null }
+    }
+
+    /**
      * Events are not idempotent, so they are never written to a state file: with
      * `channel=file` typing still works inside Android, it is only not mirrored to sfwm.
      */

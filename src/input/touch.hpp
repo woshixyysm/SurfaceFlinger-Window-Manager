@@ -513,12 +513,26 @@ static void handle_frame() {
                g_in.slots[g_primary_slot].x, g_in.slots[g_primary_slot].y, fx, fy,
                g_in.xmin, g_in.xmax, g_in.ymin, g_in.ymax);
         View *hv = hit_test(fx, fy);
+        // Which tile the press belongs to is the layout's answer, not the hit test's: a
+        // client that has not resized yet still covers the screen with its old geometry, and
+        // would otherwise swallow the touches of the tile beside it.
+        AppWin *app = nullptr;
+        if (g_tile_on) {
+            void *owner = tile_at_point(fx, fy);
+            if (owner) {
+                app = tile_app(owner);
+                if (app) hv = nullptr;                  // the tile is an Android window
+                else if (!hv) hv = tile_view(owner);     // the tile's own view, if nothing hit
+            }
+        }
+        if (!app) app = tile_app_at(fx, fy);
+        if (app) hv = nullptr;
         // An Android window has no surface to hit, so the layout names it instead. Taking
         // the focus here is what makes the keyboard follow the tile the finger chose.
         tile_tap_focus(fx, fy);
         // Touch is delivered by this compositor, so a contact on an Android tile goes to its
         // display from here: nothing else routes it, the tile is not a window of ours.
-        g_touch_app = hv ? nullptr : tile_app_at(fx, fy);
+        g_touch_app = app;
         if (g_touch_app) {
             g_touch_x = fx - g_touch_app->x;
             g_touch_y = fy - g_touch_app->y;
