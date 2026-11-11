@@ -233,17 +233,18 @@ static void tile_rects(const std::vector<void *> &keys, std::vector<sf::Rect> &o
             out.push_back(tile_rect(x, y, w, h));
             break;
         }
-        const int remaining = n - i;
         const bool vertical = h > w;
-        // No stored ratio means the plain even split, so the default layout is unchanged.
+        // No stored ratio means the plain halving, so the tree stays balanced. Halving is
+        // what makes the layout recursive: the new window takes half of what is left and
+        // the next one splits the other half again, rather than every window claiming an
+        // equal band. Three windows are a half and two quarters, four a spiral of halves.
         const float stored = tile_split_of(keys[i]);
-        const float even = 1.f / (float)remaining;
-        float ratio = stored > 0.f ? stored : even;
+        float ratio = stored > 0.f ? stored : 0.5f;
         if (ratio < 0.1f) ratio = 0.1f;
         if (ratio > 0.9f) ratio = 0.9f;
         g_tile_nodes.push_back(TileNode{keys[i], tile_rect(x, y, w, h), vertical, ratio});
         if (vertical) {
-            int32_t th = stored > 0.f ? (int32_t)((float)h * ratio + 0.5f) : h / remaining;
+            int32_t th = stored > 0.f ? (int32_t)((float)h * ratio + 0.5f) : h / 2;
             if (th < 1) th = 1;
             if (th > h - 1) th = h - 1;
             out.push_back(tile_rect(x, y, w, th));
@@ -251,7 +252,7 @@ static void tile_rects(const std::vector<void *> &keys, std::vector<sf::Rect> &o
             h -= th + gap;
             if (h < 1) h = 1;
         } else {
-            int32_t tw = stored > 0.f ? (int32_t)((float)w * ratio + 0.5f) : w / remaining;
+            int32_t tw = stored > 0.f ? (int32_t)((float)w * ratio + 0.5f) : w / 2;
             if (tw < 1) tw = 1;
             if (tw > w - 1) tw = w - 1;
             out.push_back(tile_rect(x, y, tw, h));
