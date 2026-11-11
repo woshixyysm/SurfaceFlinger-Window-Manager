@@ -63,6 +63,35 @@ class TouchInjector {
         if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) downTime = 0L
     }
 
+    /**
+     * Hovering is what makes an application react to a pointer without a button pressed: the
+     * icon that lifts under the cursor is the app's own hover state, which it only reaches if
+     * the hover events arrive on its display.
+     */
+    fun hover(displayId: Int, action: Int, x: Float, y: Float) {
+        val event = MotionEvent.obtain(0L, SystemClock.uptimeMillis(), action, x, y, 0)
+        event.setSource(android.view.InputDevice.SOURCE_MOUSE)
+        if (!place(event, displayId) && !warned) {
+            warned = true
+            Logs.w("setDisplayId is unavailable, hover would land on the default display")
+        }
+        val sent = runCatching {
+            val manager = Class.forName("android.hardware.input.InputManager")
+                .getMethod("getInstance").invoke(null)
+            Class.forName("android.hardware.input.InputManager")
+                .getMethod("injectInputEvent", InputEvent::class.java, Int::class.javaPrimitiveType)
+                .invoke(manager, event, INJECT_ASYNC)
+        }
+        event.recycle()
+        if (sent.isFailure) Logs.w("hover injection was refused", sent.exceptionOrNull())
+    }
+
+    private fun place(event: MotionEvent, displayId: Int): Boolean = runCatching {
+        MotionEvent::class.java.getMethod("setDisplayId", Int::class.javaPrimitiveType)
+            .invoke(event, displayId)
+        true
+    }.getOrDefault(false)
+
     private companion object {
         /** `InputManager.INJECT_INPUT_EVENT_MODE_ASYNC`. */
         const val INJECT_ASYNC = 0

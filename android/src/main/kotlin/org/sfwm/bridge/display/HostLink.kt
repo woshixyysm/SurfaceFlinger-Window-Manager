@@ -21,6 +21,8 @@ object HostLink {
     const val CODE_KEY = 5
     /** The window is going away. The binder outlives it, so this is the only signal. */
     const val CODE_GONE = 6
+    /** A mouse hovering over the window: the app's own hover state follows it. */
+    const val CODE_HOVER = 7
 
     /** Module to window: the rectangle to occupy, and whether it is on screen. */
     const val CODE_PLACE = 10

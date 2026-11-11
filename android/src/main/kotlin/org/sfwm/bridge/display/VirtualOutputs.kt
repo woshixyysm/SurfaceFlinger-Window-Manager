@@ -50,6 +50,7 @@ class VirtualOutputs(
         ::detach,
         ::forwardTouch,
         ::forwardKey,
+        ::forwardHover,
     )
     private val slots = settings.outputs.coerceIn(0, MAX_SLOTS)
     private val requests = LinkedHashMap<Int, SlotRequest>()
@@ -185,6 +186,28 @@ class VirtualOutputs(
         }
         lastSlot = slot
         injector.send(displayId, phase, x, y, id)
+    }
+
+    /** A mouse hovering over the host window, on its way to the display behind [slot]. */
+    private fun forwardHover(slot: Int, action: Int, x: Float, y: Float) {
+        val displayId = displays.displayIdOf(slot) ?: return
+        injector.hover(displayId, action, x, y)
+    }
+
+    /** A pointer over the display behind [slot]: hover is what an application reacts to. */
+    fun hover(slot: Int, phase: String, x: Float, y: Float) {
+        val displayId = displays.displayIdOf(slot)
+        if (displayId == null) {
+            Logs.w("hover for slot $slot dropped: the slot has no display")
+            return
+        }
+        val action = when (phase) {
+            "enter" -> android.view.MotionEvent.ACTION_HOVER_ENTER
+            "exit" -> android.view.MotionEvent.ACTION_HOVER_EXIT
+            else -> android.view.MotionEvent.ACTION_HOVER_MOVE
+        }
+        lastSlot = slot
+        injector.hover(displayId, action, x, y)
     }
 
     /** A key the host window received, on its way to the application behind [slot]. */

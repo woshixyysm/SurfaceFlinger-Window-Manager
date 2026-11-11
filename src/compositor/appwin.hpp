@@ -211,6 +211,16 @@ static bool appwin_touch(AppWin *a, const char *phase, int32_t x, int32_t y, int
     return appwin_send(line);
 }
 
+// The pointer does not "do" anything to an application: what lifts an icon is the hover
+// events it receives, so they travel the same way a contact does, with enter and exit marking
+// the moments a window gains and loses the pointer.
+static bool appwin_hover(AppWin *a, const char *phase, int32_t x, int32_t y) {
+    if (!a) return false;
+    char line[96];
+    snprintf(line, sizeof(line), "hover %d %s %d %d", a->slot, phase, x, y);
+    return appwin_send(line);
+}
+
 
 
 static void appwin_list() {    if (g_apps.empty()) {

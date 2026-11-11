@@ -17,6 +17,7 @@ import android.os.Bundle
 import android.os.IBinder
 import android.graphics.PixelFormat
 import android.os.Parcel
+import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.widget.FrameLayout
@@ -144,6 +145,29 @@ class HostActivity : Activity(), SurfaceHolder.Callback {
      * addressed to the shell's window, and the application lives on another display. The
      * event keeps its key code and meta state, so nothing is re-derived here.
      */
+    /**
+     * A mouse over the window. A cursor does not "do" anything by itself: what makes an app's
+     * icon lift is the hover events it receives, so they have to reach the display behind the
+     * window exactly like the touches do, or the application never learns the pointer is there.
+     */
+    override fun dispatchGenericMotionEvent(event: MotionEvent): Boolean {
+        if (!event.isFromSource(InputDevice.SOURCE_MOUSE)) return super.dispatchGenericMotionEvent(event)
+        val action = event.actionMasked
+        if (action != MotionEvent.ACTION_HOVER_ENTER && action != MotionEvent.ACTION_HOVER_MOVE &&
+            action != MotionEvent.ACTION_HOVER_EXIT
+        ) {
+            return super.dispatchGenericMotionEvent(event)
+        }
+        val x = event.x
+        val y = event.y
+        send(HostLink.CODE_HOVER) {
+            it.writeInt(action)
+            it.writeFloat(x)
+            it.writeFloat(y)
+        }
+        return true
+    }
+
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         val action = event.action
         val keyCode = event.keyCode

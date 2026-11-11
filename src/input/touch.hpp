@@ -841,6 +841,8 @@ static int open_pointer_device() {
 
 /** Where the mouse is, in screen pixels; kept across devices and grabs. */
 static int32_t g_mouse_x = 0, g_mouse_y = 0;
+// The Android window the pointer is currently over, so enter and exit are sent once.
+static AppWin *g_hover_app = nullptr;
 
 static int on_pointer_fd(int fd, uint32_t, void *) {
     struct input_event ev[64];
@@ -859,7 +861,20 @@ static int on_pointer_fd(int fd, uint32_t, void *) {
             if (g_mouse_x > g_out_w - 1) g_mouse_x = g_out_w - 1;
             if (g_mouse_y > g_out_h - 1) g_mouse_y = g_out_h - 1;
             cursor_from_pointer();               // a pointer is present: the cursor is drawn
-            pointer_motion(g_mouse_x, g_mouse_y, true);
+            // An Android window is not a surface of ours: the pointer is handed to its
+            // display so the application can reach its own hover state, and the wayland
+            // clients see nothing of a move that happened over the other kind of tile.
+            AppWin *over = tile_app_at(g_mouse_x, g_mouse_y);
+            if (over != g_hover_app) {
+                if (g_hover_app) appwin_hover(g_hover_app, "exit", 0, 0);
+                if (over) appwin_hover(over, "enter", g_mouse_x - over->x, g_mouse_y - over->y);
+                g_hover_app = over;
+            }
+            if (over) {
+                appwin_hover(over, "move", g_mouse_x - over->x, g_mouse_y - over->y);
+            } else {
+                pointer_motion(g_mouse_x, g_mouse_y, true);
+            }
             cursor_present();
         }
     }

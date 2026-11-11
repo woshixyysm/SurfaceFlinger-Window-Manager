@@ -86,6 +86,15 @@ class ControlChannel(private val host: VirtualOutputs) {
                     val slot = parts.getOrNull(1)?.toIntOrNull()
                     if (slot != null) host.focus(slot) else Logs.w("focus needs a slot")
                 }
+                "hover" -> {
+                    val slot = parts.getOrNull(1)?.toIntOrNull()
+                    val phase = parts.getOrNull(2)
+                    val x = parts.getOrNull(3)?.toFloatOrNull()
+                    val y = parts.getOrNull(4)?.toFloatOrNull()
+                    if (slot != null && phase != null && x != null && y != null)
+                        host.hover(slot, phase, x, y)
+                    else Logs.w("hover needs a slot, a phase and two coordinates")
+                }
 
                 "status" -> host.publishNow()
                 else -> Logs.w("unknown control command '${parts[0]}'")

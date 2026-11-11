@@ -32,6 +32,7 @@ class OutputStage(
     private val surfaceGoneSink: (slot: Int) -> Unit,
     private val touchSink: (slot: Int, action: Int, x: Float, y: Float) -> Unit,
     private val keySink: (slot: Int, action: Int, keyCode: Int, metaState: Int) -> Unit,
+    private val hoverSink: (slot: Int, action: Int, x: Float, y: Float) -> Unit,
 ) {
     private val placements = HashMap<Int, OutputPlacement>()
     private val endpoints = HashMap<Int, Endpoint>()
@@ -78,6 +79,13 @@ class OutputStage(
                     val x = data.readFloat()
                     val y = data.readFloat()
                     onMain { touchSink(slot, action, x, y) }
+                    return true
+                }
+                HostLink.CODE_HOVER -> {
+                    val action = data.readInt()
+                    val x = data.readFloat()
+                    val y = data.readFloat()
+                    onMain { hoverSink(slot, action, x, y) }
                     return true
                 }
                 HostLink.CODE_KEY -> {
