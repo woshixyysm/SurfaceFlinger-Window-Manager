@@ -258,9 +258,13 @@ loaded with `System.load`, and the icon is built through JNI, since an `ABitmap`
 from a Java `android.graphics.Bitmap`. The design notes are in
 [doc/bridge.md](doc/bridge.md#the-pointer).
 
-The picture over a tile is a plain arrow drawn once at the sprite's size; the theme's
-`pointer_icon` is not used yet. Both directions of the handover are exercised on the device
-with a `/dev/uinput` virtual mouse: over a tile the sprite appears and the compositor's layer
+The picture is the theme's own pointer: `pointer_arrow` out of the system resources, drawn into a
+24 dp square at the panel's density, so a vendor theme changes it like it changes every other
+cursor on the screen. `PointerIcon.getSystemIcon` would be the direct route, but it wants a
+`Context`, and a process started by `app_process` has none — the drawable behind it is resolved
+from `Resources.getSystem()` instead, and an arrow drawn by hand remains the fallback for the
+day the framework renames it. Both directions of the handover are exercised on the device with
+a `/dev/uinput` virtual mouse: over a tile the sprite appears and the compositor's layer
 disappears, and outside one the sprite is hidden and the compositor's cursor comes back.
 
 ## Environment variables

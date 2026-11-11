@@ -111,6 +111,7 @@ struct Host {
     void *looper = nullptr;
     void *sprite = nullptr;
     bool visible = false;
+    int32_t iconSize = ICON_SIZE;
     int32_t lastX = -1, lastY = -1;
 
     SpLooper (*prepare)(int) = nullptr;
@@ -285,33 +286,143 @@ void drawArrow(uint8_t *base, int32_t width, int32_t height, int32_t stride) {
     fillPolygon(base, width, height, stride, inner, 7, 0xFF, 0xFF, 0xFF);
 }
 
-jobject createIcon(JNIEnv *env) {
+/**
+ * The pointer icon the system itself would draw. `PointerIcon.getSystemIcon` needs a
+ * `Context`, and a process started by app_process has none of its own, so the drawable behind
+ * it is resolved straight from the system resources instead: `pointer_arrow` is what the
+ * default pointer resolves to, density variants included, and it is what a vendor theme
+ * overrides. It is drawn into a 24 dp square, which is the size the input service asks for.
+ */
+jobject themeIcon(JNIEnv *env) {
+    jclass resCls = env->FindClass("android/content/res/Resources");
+    if (!resCls || env->ExceptionCheck()) {
+        env->ExceptionClear();
+        LOGW("android.content.res.Resources is not reachable");
+        return nullptr;
+    }
+    jmethodID getSystem =
+        env->GetStaticMethodID(resCls, "getSystem", "()Landroid/content/res/Resources;");
+    jmethodID getIdentifier = env->GetMethodID(
+        resCls, "getIdentifier",
+        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)I");
+    jmethodID getDrawable = env->GetMethodID(
+        resCls, "getDrawable",
+        "(ILandroid/content/res/Resources$Theme;)Landroid/graphics/drawable/Drawable;");
+    jmethodID getMetrics =
+        env->GetMethodID(resCls, "getDisplayMetrics", "()Landroid/util/DisplayMetrics;");
+    if (!getSystem || !getIdentifier || !getDrawable || !getMetrics || env->ExceptionCheck()) {
+        env->ExceptionClear();
+        LOGW("the system resources are not reachable");
+        return nullptr;
+    }
+    jobject resources = env->CallStaticObjectMethod(resCls, getSystem);
+    if (env->ExceptionCheck() || !resources) {
+        env->ExceptionClear();
+        LOGW("Resources.getSystem returned nothing");
+        return nullptr;
+    }
+    jstring name = env->NewStringUTF("pointer_arrow");
+    jstring kind = env->NewStringUTF("drawable");
+    jstring package = env->NewStringUTF("android");
+    const jint id = env->CallIntMethod(resources, getIdentifier, name, kind, package);
+    if (env->ExceptionCheck() || id == 0) {
+        env->ExceptionClear();
+        LOGW("the framework has no pointer_arrow drawable");
+        return nullptr;
+    }
+    jobject drawable = env->CallObjectMethod(resources, getDrawable, id, (jobject) nullptr);
+    if (env->ExceptionCheck() || !drawable) {
+        env->ExceptionClear();
+        LOGW("the pointer drawable could not be loaded");
+        return nullptr;
+    }
+    jobject metrics = env->CallObjectMethod(resources, getMetrics);
+    jclass metricsCls = env->FindClass("android/util/DisplayMetrics");
+    jfieldID densityField = metricsCls ? env->GetFieldID(metricsCls, "density", "F") : nullptr;
+    const jfloat density =
+        (metrics && densityField) ? env->GetFloatField(metrics, densityField) : 0.0f;
+    int32_t size = (int32_t)(24 * density + 0.5f);
+    if (size < 8 || size > 256) size = ICON_SIZE;
+
+    jclass bitmapCls = env->FindClass("android/graphics/Bitmap");
+    jclass configCls = env->FindClass("android/graphics/Bitmap$Config");
+    jclass canvasCls = env->FindClass("android/graphics/Canvas");
+    jclass drawableCls = env->FindClass("android/graphics/drawable/Drawable");
+    if (!bitmapCls || !configCls || !canvasCls || !drawableCls || env->ExceptionCheck()) {
+        env->ExceptionClear();
+        LOGW("the drawing classes are not reachable");
+        return nullptr;
+    }
+    jfieldID argb =
+        env->GetStaticFieldID(configCls, "ARGB_8888", "Landroid/graphics/Bitmap$Config;");
+    jmethodID create = env->GetStaticMethodID(
+        bitmapCls, "createBitmap", "(IILandroid/graphics/Bitmap$Config;)Landroid/graphics/Bitmap;");
+    jmethodID canvasCtor = env->GetMethodID(canvasCls, "<init>", "(Landroid/graphics/Bitmap;)V");
+    jmethodID setBounds = env->GetMethodID(drawableCls, "setBounds", "(IIII)V");
+    jmethodID draw = env->GetMethodID(drawableCls, "draw", "(Landroid/graphics/Canvas;)V");
+    if (!argb || !create || !canvasCtor || !setBounds || !draw || env->ExceptionCheck()) {
+        env->ExceptionClear();
+        LOGW("the drawing calls are not reachable");
+        return nullptr;
+    }
+    jobject config = env->GetStaticObjectField(configCls, argb);
+    jobject bitmap = env->CallStaticObjectMethod(
+        bitmapCls, create, (jint)size, (jint)size, config);
+    jobject canvas = bitmap ? env->NewObject(canvasCls, canvasCtor, bitmap) : nullptr;
+    if (env->ExceptionCheck() || !bitmap || !canvas) {
+        env->ExceptionClear();
+        LOGW("the icon bitmap was refused");
+        return nullptr;
+    }
+    env->CallVoidMethod(drawable, setBounds, 0, 0, (jint)size, (jint)size);
+    env->CallVoidMethod(drawable, draw, canvas);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        LOGW("the pointer drawable could not be drawn");
+        return nullptr;
+    }
+    LOGI("pointer_arrow at %dpx, density %.2f", size, (double)density);
+    return bitmap;
+}
+
+// A drawable that resolves but paints nothing would leave an invisible cursor, which is very
+// hard to tell apart from a sprite that never showed up, so the icon is checked once here.
+int32_t paintedPixels(JNIEnv *env, jobject bitmap) {
+    AndroidBitmapInfo info = {};
+    void *pixels = nullptr;
+    if (!g.bitmapInfo || !g.lockPixels || !g.unlockPixels) return -1;
+    if (g.bitmapInfo(env, bitmap, &info) != 0 || info.format != 1 /* RGBA_8888 */) return -1;
+    if (g.lockPixels(env, bitmap, &pixels) != 0 || !pixels) return -1;
+    int32_t painted = 0;
+    for (uint32_t y = 0; y < info.height; ++y) {
+        const uint8_t *row = (const uint8_t *)pixels + (size_t)y * info.stride;
+        for (uint32_t x = 0; x < info.width; ++x) {
+            if (row[x * 4 + 3] != 0) ++painted;
+        }
+    }
+    g.unlockPixels(env, bitmap);
+    return painted;
+}
+
+/** The last resort: an arrow of the pointer-icon shape, drawn once at a fixed size. */
+jobject drawnIcon(JNIEnv *env) {
     jclass bitmapCls = env->FindClass("android/graphics/Bitmap");
     if (env->ExceptionCheck() || !bitmapCls) {
-        env->ExceptionDescribe();
         env->ExceptionClear();
         LOGW("android.graphics.Bitmap is not reachable");
         return nullptr;
     }
     jclass configCls = env->FindClass("android/graphics/Bitmap$Config");
     if (env->ExceptionCheck() || !configCls) {
-        env->ExceptionDescribe();
         env->ExceptionClear();
         LOGW("Bitmap$Config is not reachable");
         return nullptr;
     }
     jfieldID argb =
         env->GetStaticFieldID(configCls, "ARGB_8888", "Landroid/graphics/Bitmap$Config;");
-    if (env->ExceptionCheck() || !argb) {
-        env->ExceptionDescribe();
-        env->ExceptionClear();
-        LOGW("Bitmap$Config.ARGB_8888 is not reachable");
-        return nullptr;
-    }
     jmethodID create = env->GetStaticMethodID(
         bitmapCls, "createBitmap", "(IILandroid/graphics/Bitmap$Config;)Landroid/graphics/Bitmap;");
-    if (env->ExceptionCheck() || !create) {
-        env->ExceptionDescribe();
+    if (!argb || !create || env->ExceptionCheck()) {
         env->ExceptionClear();
         LOGW("Bitmap.createBitmap is not reachable");
         return nullptr;
@@ -320,7 +431,6 @@ jobject createIcon(JNIEnv *env) {
     jobject bitmap = env->CallStaticObjectMethod(
         bitmapCls, create, (jint)ICON_SIZE, (jint)ICON_SIZE, config);
     if (env->ExceptionCheck() || !bitmap) {
-        env->ExceptionDescribe();
         env->ExceptionClear();
         LOGW("the icon bitmap was refused");
         return nullptr;
@@ -353,8 +463,20 @@ bool startSprite(JNIEnv *env) {
     // every window and keeps it eligible for the cursor plane.
     g.ctor(g.controller, SpLooper(g.looper), 0, [](DispId) { return SpFC(); });
 
-    jobject icon = createIcon(env);
+    // The system's own icon when the theme yields one, a drawn arrow otherwise.
+    jobject icon = themeIcon(env);
+    bool themed = icon != nullptr;
+    if (!icon) {
+        env->ExceptionClear();
+        icon = drawnIcon(env);
+    }
     if (!icon) return false;
+    AndroidBitmapInfo iconInfo = {};
+    if (g.bitmapInfo(env, icon, &iconInfo) == 0 && iconInfo.width > 0) {
+        g.iconSize = (int32_t)iconInfo.width;
+    }
+    LOGI("%s pointer icon, %dx%d, %d painted pixels", themed ? "theme" : "drawn",
+         (int)g.iconSize, (int)g.iconSize, paintedPixels(env, icon));
     g.sprite = g.createSprite(g.controller).p;
     if (!g.sprite) {
         LOGW("createSprite returned nothing");
@@ -384,8 +506,8 @@ void handleCommand(const char *phase, int32_t x, int32_t y) {
         pump();
         return;
     }
-    // The hotspot is the arrow's tip, one unit inside the icon.
-    const float hotspot = (float)ICON_SIZE / 24.0f;
+    // The hotspot is the arrow's tip, one unit inside the icon's 24 unit box.
+    const float hotspot = (float)g.iconSize / 24.0f;
     if (g.visible && strcmp(phase, "move") == 0) {
         if (x == g.lastX && y == g.lastY) return;
         g.setPosition(g.sprite, (float)x - hotspot, (float)y - hotspot);
