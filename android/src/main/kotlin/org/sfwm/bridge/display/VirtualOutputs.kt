@@ -193,6 +193,14 @@ class VirtualOutputs(
     private fun start(slot: Int, displayId: Int, packageName: String) {
         val key = "$displayId:$packageName"
         if (launched[slot] == key) return
+        // HOME is a single-task activity on this build, so asking for it again delivers the
+        // intent to the task already on the default display and the hosted display stays
+        // empty. Moving the existing task is the only way to get a real launcher window.
+        if (packageName == HOME && moveHomeTo(displayId)) {
+            launched[slot] = key
+            Logs.i("moved the launcher to display $displayId")
+            return
+        }
         val intent = if (packageName == HOME) {
             Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
         } else {
@@ -221,6 +229,73 @@ class VirtualOutputs(
             Logs.w("could not start $packageName on display $displayId", it)
         }
     }
+
+    /**
+     * Moves the home root task onto [displayId] and reports whether it moved. Both calls are
+     * hidden API and need a system permission, but this module runs inside the shell (uid
+     * 1000) and the platform grants signature permissions to the system uid, so a reflective
+     * call is enough.
+     */
+    private fun moveHomeTo(displayId: Int): Boolean {
+        val atm = atmService()
+        val taskId = homeRootTaskId(atm)
+        if (taskId == null) {
+            Logs.w("no home root task to move")
+            return false
+        }
+        val moved = runCatching {
+            atm?.javaClass
+                ?.getMethod("moveRootTaskToDisplay", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
+                ?.invoke(atm, taskId, displayId) as? Boolean ?: false
+        }.onFailure { Logs.w("moveRootTaskToDisplay failed", it) }.getOrDefault(false)
+        if (moved) {
+            Logs.i("moved home root task $taskId to display $displayId")
+            return true
+        }
+        // Fall back to the platform's own command, which resolves the same root task.
+        val rc = runCatching {
+            val proc = Runtime.getRuntime().exec(arrayOf("sh", "-c", "am display move-stack $taskId $displayId"))
+            proc.waitFor()
+        }.onFailure { Logs.w("am display move-stack failed", it) }.getOrDefault(-1)
+        if (rc != 0) {
+            Logs.w("could not move home root task $taskId to display $displayId (rc=$rc)")
+            return false
+        }
+        Logs.i("moved home root task $taskId to display $displayId with am")
+        return true
+    }
+
+    private fun atmService(): Any? = runCatching {
+        Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null)
+    }.onFailure { Logs.w("could not reach ActivityTaskManager", it) }.getOrNull()
+
+    /**
+     * Id of the home root task. The platform's root task list is asked first, because it
+     * classifies tasks by activity type; `dumpsys` is the fallback, since it prints the same
+     * list in text.
+     */
+    private fun homeRootTaskId(atm: Any?): Int? {
+        val fromList = runCatching {
+            val roots = atm?.javaClass?.getMethod("getAllRootTaskInfos")?.invoke(atm) as? List<*>
+            val home = roots.orEmpty()
+                .filterIsInstance<Any>()
+                .firstOrNull { intOf(it, "activityType") == ACTIVITY_TYPE_HOME }
+            home?.let { intOf(it, "taskId") }
+        }.onFailure { Logs.w("could not read the root task list", it) }.getOrNull()
+        if (fromList != null) return fromList
+        // `* Task{4c467fd #1 type=home ...}` is the line that carries the id.
+        return runCatching {
+            val proc = Runtime.getRuntime().exec(arrayOf("sh", "-c",
+                "dumpsys activity activities 2>/dev/null | grep -m1 'type=home'"))
+            val line = proc.inputStream.bufferedReader().readLine() ?: return@runCatching null
+            proc.waitFor()
+            Regex("#(\\d+)\\s+type=home").find(line)?.groupValues?.get(1)?.toIntOrNull()
+        }.onFailure { Logs.w("could not parse the home task id", it) }.getOrNull()
+    }
+
+    private fun intOf(target: Any, name: String): Int? = runCatching {
+        target.javaClass.getField(name).get(target) as? Int
+    }.getOrNull()
 
     private fun detach(slot: Int) {
         BridgeReport.forgetOutput(slot)
@@ -292,6 +367,9 @@ class VirtualOutputs(
 
         /** The package name that means "the launcher" in a request and in the state file. */
         const val HOME = "home"
+
+        /** ActivityTaskManager's ACTIVITY_TYPE_HOME, needed to pick the launcher's root task. */
+        const val ACTIVITY_TYPE_HOME = 2
 
         /** Only used when the panel cannot be read at all; never preferred over a real one. */
         val FALLBACK_PANEL = PanelMetrics(1080, 2400, 420)

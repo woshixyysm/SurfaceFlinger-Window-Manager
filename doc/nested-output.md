@@ -186,10 +186,12 @@ stays empty. Nesting does not change that, because it is a task-launch policy.
 
 Two ways out, in order of cost:
 
-- **Move the task instead of starting it.** `ActivityTaskManager.moveTaskToDisplay` on the
-  launcher task puts the real launcher on the hosted display, keeping its state. The
-  compositor already knows the display id, so this is one more command on the control
-  channel and no new rendering path.
+- **Move the task instead of starting it.** `ActivityTaskManager.moveRootTaskToDisplay` on the
+  launcher task puts the real launcher on the hosted display, keeping its state. The compositor
+  already knows the display id, so this is one more command on the control channel and no new
+  rendering path. *Implemented* in the module and measured on the device: at boot the launcher
+  window appears with `mDisplayId` set to the slot's display and tiles like any other window.
+  See `doc/bridge.md` for the fallbacks and for the case where the platform refuses the move.
 - **Give the launcher window its own compositor.** A small Wayland client that draws the
   application grid and starts applications is a normal tile, needs no display at all, and
   can show what the hosted displays contain by capturing their layers. This is the
@@ -197,4 +199,6 @@ Two ways out, in order of cost:
   of an Android application.
 
 The second is the one that looks like a desktop. It is also the one that does not depend on
-what the vendor launcher allows.
+what the vendor launcher allows. Known cosmetic gap in the first: after the tile is resized
+the launcher draws on a black background, because the wallpaper service does not follow a
+secondary display whose size changes.

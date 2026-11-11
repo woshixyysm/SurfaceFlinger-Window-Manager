@@ -151,6 +151,15 @@ already running on the default display and the hosted window stays empty. Ordina
 do start on a secondary display, and `close` releases the window if a package cannot be
 hosted.
 
+`home` therefore takes a different path: the shell's own home root task is **moved** onto the
+slot's display with `ActivityTaskManager.moveRootTaskToDisplay`, so the tile shows the real
+launcher and keeps its state. The task id comes from `getAllRootTaskInfos()` (activity type
+home), with `dumpsys activity activities` as the fallback, and `am display move-stack` as the
+fallback for the move itself. The move is refused once the platform already owns a home root
+task on the default display ("addRootTaskReferenceIfNeeded … already exist"), and then the
+launch path below it runs instead; on this build that path does produce a launcher task on the
+hosted display, so a tile appears either way.
+
 The same slot can be configured up front with `output.<n>.package=` (`home` or a package) and
 `outputs=<n>`; a slot with no package stays a plain output.
 
