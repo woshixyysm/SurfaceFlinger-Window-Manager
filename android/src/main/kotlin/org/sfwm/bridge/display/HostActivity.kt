@@ -107,16 +107,8 @@ class HostActivity : Activity(), SurfaceHolder.Callback {
     }
 
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
-        // The window only sees contacts that reached it: whatever the shell has above it
-        // consumed them first. Those are the ones the hosted display should get.
-        val action = event.actionMasked
-        val x = event.x
-        val y = event.y
-        send(HostLink.CODE_TOUCH) {
-            it.writeInt(action)
-            it.writeFloat(x)
-            it.writeFloat(y)
-        }
+        // Touch is read by the compositor, which knows which tile the finger is on and
+        // forwards it to the right display; handling it here as well would deliver it twice.
         return true
     }
 

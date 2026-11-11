@@ -125,7 +125,11 @@ static void toplevel_send_configure(View *v) {
     // Never send the full output size, or dialogs get stretched. 0x0 lets the client decide.
     int32_t lw = 0, lh = 0;
     const int32_t cfgScale = client_scale(v);   // measured client scale
-    if (v->want_maximized || v->want_fullscreen) {
+    // A tiled window's size is the tile, so a maximise request cannot have it: Qt apps ask
+    // for maximise on their own and would otherwise cover the other tiles. An explicit
+    // fullscreen request still wins, because only the user asks for it.
+    const bool tiled = tile_owns(v);
+    if (v->want_fullscreen || (!tiled && v->want_maximized)) {
         lw = g_out_w / cfgScale;
         lh = g_out_h / cfgScale;
         if (lw < 1) lw = 1;

@@ -279,6 +279,9 @@ static void tile_apply() {
         if (sc < 1) sc = 1;
         v->x = r.left;
         v->y = r.top;
+        // The tile is the size: a client that maximised itself keeps its state bits, but
+        // they no longer decide the geometry.
+        v->want_maximized = false;
         v->req_w = w / sc;
         v->req_h = h / sc;
         if (v->req_w < 1) v->req_w = 1;
@@ -617,6 +620,16 @@ static bool tile_tap_focus(int32_t x, int32_t y) {
         return true;
     }
     return false;
+}
+
+/** The Android window under a point, or null: the same search the tap focus does. */
+static AppWin *tile_app_at(int32_t x, int32_t y) {
+    for (AppWin *a : g_apps) {
+        if (a->ws != g_ws_active || a->w <= 0 || a->h <= 0) continue;
+        if (x < a->x || y < a->y || x >= a->x + a->w || y >= a->y + a->h) continue;
+        return a;
+    }
+    return nullptr;
 }
 
 // Three-finger gesture: horizontal moves the focus, vertical swaps, a tap toggles float.

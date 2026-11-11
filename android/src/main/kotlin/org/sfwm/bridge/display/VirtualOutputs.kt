@@ -258,6 +258,7 @@ class VirtualOutputs(
         val task = object : Runnable {
             override fun run() {
                 if (!running) return
+                restartMissingWindows()
                 Thread { runCatching { sweepDefaultDisplay() }.onFailure { Logs.w("sweep failed", it) } }
                     .start()
                 handler.postDelayed(this, SWEEP_INTERVAL_MS)
@@ -265,6 +266,19 @@ class VirtualOutputs(
         }
         sweep = task
         handler.postDelayed(task, SWEEP_INTERVAL_MS)
+    }
+
+    /**
+     * A slot whose window went away — the shell finishing it, a crash, a low-memory kill —
+     * is started again. Without this the display would keep running with nothing on screen
+     * and the tile would be unreachable.
+     */
+    private fun restartMissingWindows() {
+        for ((slot, request) in requests.entries.toList()) {
+            if (!running || stage.isMounted(slot)) continue
+            Logs.i("slot $slot lost its window, starting it again")
+            stage.mount(slot, request.placement)
+        }
     }
 
     private fun sweepDefaultDisplay() {

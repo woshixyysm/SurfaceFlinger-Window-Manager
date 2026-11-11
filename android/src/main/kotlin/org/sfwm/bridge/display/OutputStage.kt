@@ -47,8 +47,17 @@ class OutputStage(
         override fun onTransact(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean {
             when (code) {
                 HostLink.CODE_HELLO -> {
-                    peer = data.readStrongBinder()
+                    val binder = data.readStrongBinder()
+                    peer = binder
                     taskId = data.readInt()
+                    // A window that goes away must not look alive: the slot is started again
+                    // by the sweep, which is what keeps a tile from vanishing for good.
+                    runCatching {
+                        binder?.linkToDeath({
+                            if (peer === binder) peer = null
+                            Logs.w("output $slot window is gone")
+                        }, 0)
+                    }
                     Logs.i("output $slot task $taskId is connected")
                     placements[slot]?.let { applyPlace(slot, it) }
                     if (!shown) sendShown(slot, false)
@@ -189,6 +198,7 @@ class OutputStage(
         val options = ActivityOptions.makeBasic()
         launchWindowingMode(options, WINDOWING_MODE_FREEFORM)
         launchBounds(options, placement)
+        freeformCaptions(options)
         context.startActivity(intent, options.toBundle())
         Logs.i("output $slot started as a freeform task at ${placement.x},${placement.y}")
         true
@@ -214,6 +224,19 @@ class OutputStage(
         ActivityOptions::class.java.getMethod("setLaunchBounds", Rect::class.java)
             .invoke(options, bounds)
     }.onFailure { Logs.w("setLaunchBounds unavailable", it) }
+
+    /**
+     * A freeform task is drawn with the shell's own caption — back, minimise, maximise,
+     * close — which is decoration a hosted tile does not want: the compositor is the window
+     * manager here. The switch is hidden, so it is asked for reflectively and its absence is
+     * not fatal: the tile simply keeps the caption.
+     */
+    private fun freeformCaptions(options: ActivityOptions) = runCatching {
+        ActivityOptions::class.java
+            .getMethod("setFreeformCaptionsEnabled", Boolean::class.javaPrimitiveType)
+            .invoke(options, false)
+        Logs.i("host window asked for no captions")
+    }.onFailure { Logs.w("setFreeformCaptionsEnabled unavailable, the tile keeps its caption", it) }
 
     private companion object {
         /** `WindowConfiguration.WINDOWING_MODE_FREEFORM`. */

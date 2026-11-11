@@ -201,6 +201,16 @@ static bool appwin_focus(AppWin *a) {
     return appwin_send(line);
 }
 
+// Touch belongs to the compositor: it reads the panel and decides which tile the finger is
+// on, so a contact inside an Android window is delivered from here. The coordinates are the
+// window's own, which are the display's, because the window is exactly as large as it.
+static bool appwin_touch(AppWin *a, const char *phase, int32_t x, int32_t y, int32_t id) {
+    if (!a) return false;
+    char line[96];
+    snprintf(line, sizeof(line), "touch %d %s %d %d %d", a->slot, phase, x, y, id);
+    return appwin_send(line);
+}
+
 
 
 static void appwin_list() {    if (g_apps.empty()) {

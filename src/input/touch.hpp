@@ -20,6 +20,10 @@ enum TouchOwner { OWNER_NONE = 0, OWNER_CLIENT, OWNER_MOVE, OWNER_RESIZE, OWNER_
                   OWNER_TILE_RATIO };
 
 static TouchOwner g_owner = OWNER_NONE;
+// The Android tile the current contact belongs to. Such a window has no surface of ours, so
+// the contact is forwarded to its display for as long as the finger is down.
+static AppWin *g_touch_app = nullptr;
+static int32_t g_touch_x = 0, g_touch_y = 0;   // last position, in the window's coordinates
 static int touch_owner_value(void) { return (int)g_owner; }
 static View *g_gesture_view = nullptr;      // target of MOVE and RESIZE
 static View *g_client_view = nullptr;       // target in CLIENT mode, needed for the secondary finger release
@@ -184,6 +188,23 @@ static void handle_frame() {
         if (nf == 0) { fx = sx; fy = sy; g_primary_slot = i; }
         sumx += sx; sumy += sy;
         nf++;
+    }
+
+    // A contact that began on an Android tile belongs to that display until it ends. The
+    // tile is not a window of ours, so nothing else would route it there.
+    if (g_touch_app) {
+        if (nf == 0) {
+            appwin_touch(g_touch_app, "up", g_touch_x, g_touch_y, 0);
+            g_touch_app = nullptr;
+            g_owner = OWNER_NONE;
+            if (g_lp_timer) wl_event_source_timer_update(g_lp_timer, 0);
+            cursor_hide();
+            return;
+        }
+        g_touch_x = fx - g_touch_app->x;
+        g_touch_y = fy - g_touch_app->y;
+        appwin_touch(g_touch_app, "move", g_touch_x, g_touch_y, 0);
+        return;
     }
 
     // ---------- all fingers released ----------
@@ -495,6 +516,14 @@ static void handle_frame() {
         // An Android window has no surface to hit, so the layout names it instead. Taking
         // the focus here is what makes the keyboard follow the tile the finger chose.
         tile_tap_focus(fx, fy);
+        // Touch is delivered by this compositor, so a contact on an Android tile goes to its
+        // display from here: nothing else routes it, the tile is not a window of ours.
+        g_touch_app = hv ? nullptr : tile_app_at(fx, fy);
+        if (g_touch_app) {
+            g_touch_x = fx - g_touch_app->x;
+            g_touch_y = fy - g_touch_app->y;
+            appwin_touch(g_touch_app, "down", g_touch_x, g_touch_y, 0);
+        }
         int corner = corner_hit(hv, fx, fy);
         // A corner press no longer resizes immediately: it is armed first and only starts
         // once the finger moves past the threshold.
