@@ -28,19 +28,40 @@ Two properties make this the right model:
 - `SurfaceControl` is transferable over binder: an `IGraphicBufferProducer` written into a
   `Parcel` and read on the other side becomes a `Surface` the receiver can use.
 
-## Route A — the compositor creates the display
+## Route A — the compositor creates the display through SurfaceFlinger
 
-sfwm runs as root and can reach `IDisplayManager` through servicemanager. If
-`createVirtualDisplay` is accepted from that uid, the display is created inside the
-compositor, given its own `SurfaceControl` as output, and released with it. No surface
-crosses a process boundary at all, which is the smallest possible ABI surface.
+A virtual display does not need `DisplayManager` at all. SurfaceFlinger has its own display
+API — the one the shell uses for `--new-display` style features:
 
-The cost is that the compositor then owns the parts of display management it currently
-leaves to the shell: density, layer stack, and releasing the display on teardown. Starting
-an application on it still needs `ActivityTaskManager`, which root can also reach.
+```
+SurfaceComposerClient::createDisplay(name, secure)   -> display token + layer
+Transaction::setDisplaySurface(token, surface)       -> where the display renders
+Transaction::setDisplayProjection / setDisplayLayerStack
+```
 
-Uncertainty: which permission the platform checks for `createVirtualDisplay`. A refusal is
-immediate and cannot damage the session, so this is worth trying first.
+The compositor already owns `SurfaceComposerClient` and a `SurfaceControl`, so both ends of
+that call are in one process: the display renders into a layer the compositor owns, which is
+exactly the nesting this document is about, with no surface crossing a process boundary and
+no parcelable ABI to agree on.
+
+Permission is not the obstacle it looks like. AOSP has no `CREATE_VIRTUAL_DISPLAY`
+permission; what is checked are the *flags* of a `DisplayManager` display (mirroring, secure,
+trusted), and SurfaceFlinger's own access check accepts `AID_GRAPHICS`, `AID_SYSTEM`, or
+`ACCESS_SURFACE_FLINGER`, while `PermissionCache` short-circuits `uid == 0`. The compositor
+runs as root, so it passes. SELinux is the part to verify on the device: a KernelSU `su`
+domain still needs `binder { call }` to `surfaceflinger`, which the existing transactions
+already prove is allowed.
+
+What is left for the module is only what needs Android policy: starting the application on
+the display id, which it already does with `setLaunchDisplayId`.
+
+Costs, in exchange for a real layer:
+
+- the compositor owns display bookkeeping — density, layer stack, projection, teardown;
+- the display is not a `DisplayManager` "trusted" display, so the shell may treat it as an
+  external monitor (no system decorations unless asked for);
+- release order matters: the display must go before its layer, or the surface stays owned by
+  a dead display.
 
 ## Route B — the module hosts the display, the compositor provides the surface
 
