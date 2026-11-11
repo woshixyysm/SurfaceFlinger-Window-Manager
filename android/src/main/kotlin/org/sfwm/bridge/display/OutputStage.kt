@@ -28,12 +28,15 @@ class OutputStage(
         val root: FrameLayout,
         val view: SurfaceView,
         val params: WindowManager.LayoutParams,
-    )
+    ) {
+        var restoredY: Int = 0
+    }
 
     private val windowManager: WindowManager? =
         context.getSystemService(WindowManager::class.java)
 
     private val frames = HashMap<Int, Frame>()
+    private var shown = true
 
     fun isMounted(slot: Int): Boolean = frames[slot]?.root?.isAttachedToWindow == true
 
@@ -107,13 +110,27 @@ class OutputStage(
     /**
      * Hides or shows every window at once. The lock screen owns the display while it is up,
      * and an overlay would otherwise keep showing the application above it.
+     *
+     * The window is parked below the panel instead of being made invisible: an invisible
+     * `SurfaceView` destroys its surface, which would tear down every hosted display and
+     * restart the applications on unlock. Off screen, the display keeps rendering and the
+     * session is exactly as it was.
      */
     fun setVisible(visible: Boolean) {
+        if (visible == shown) return
+        shown = visible
+        val manager = windowManager ?: return
         for (frame in frames.values) {
-            frame.root.visibility =
-                if (visible) android.view.View.VISIBLE else android.view.View.INVISIBLE
+            if (visible) {
+                frame.params.y = frame.restoredY
+            } else {
+                frame.restoredY = frame.params.y
+                frame.params.y = PARKED_Y
+            }
+            runCatching { manager.updateViewLayout(frame.root, frame.params) }
+                .onFailure { Logs.w("an output could not be moved for the lock screen", it) }
         }
-        Logs.i("output windows ${if (visible) "shown" else "hidden"}")
+        Logs.i("output windows ${if (visible) "shown" else "parked off screen"}")
     }
 
     fun unmountAll() {
@@ -137,6 +154,9 @@ class OutputStage(
         }
 
     private companion object {
+        /** Far below any panel, so the window is composed but never seen. */
+        const val PARKED_Y = 20000
+
         /** SystemUI holds SYSTEM_ALERT_WINDOW, and the window is added from its process. */
         const val WINDOW_TYPE = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
 
