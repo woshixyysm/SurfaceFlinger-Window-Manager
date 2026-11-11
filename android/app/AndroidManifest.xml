@@ -22,7 +22,7 @@
             android:excludeFromRecents="true"
             android:resizeableActivity="true"
             android:launchMode="standard"
-            android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode" />
     </application>
 </manifest>
