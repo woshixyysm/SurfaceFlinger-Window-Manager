@@ -378,6 +378,7 @@ static View *front_view() {
 }
 
 static void dd_focus_changed(View *v);   // protocol/data_device.hpp: the clipboard follows focus
+static void cursor_sprite(bool show, int32_t x, int32_t y);   // input/touch.hpp: pointer picture
 
 // The physical keyboard device, once one is found (input/touch.hpp sets the descriptor).
 // Its keys are taken away from the shell only while a Wayland client has the focus: an
@@ -400,6 +401,9 @@ static void kb_device_grab(bool grab) {
     if (!any && (g_kbd_fd >= 0 || g_ptr_fd >= 0)) return;
     g_kbd_grabbed = grab;
     printf("[kbd] input devices %s\n", grab ? "taken from the shell" : "returned to the shell");
+    // Whose picture is on screen follows whose events are: the shell draws its own cursor
+    // when it owns the pointer, so ours has to go.
+    if (!grab) cursor_sprite(false, 0, 0);
 }
 
 static void kb_set_focus(View *v) {

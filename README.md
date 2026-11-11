@@ -216,6 +216,53 @@ written, so no unpainted area is left for SurfaceFlinger to blend.
 Setting `SFWM_GL=0` selects the CPU path, which maps the dmabuf and copies it. It is kept
 for comparison and as a fallback when the EGL display cannot be created.
 
+## The pointer
+
+A cursor is drawn by whoever owns the pointer, and on this platform that decides whether the
+hardware cursor plane can be involved at all.
+
+Over a Wayland window the compositor owns the mouse: it grabs the device, reads `EV_REL`,
+draws the theme cursor into a layer of its own and delivers `wl_pointer`. That layer is a
+client layer, so SurfaceFlinger composites it, and it carries a touchable region over its
+pixels, which is why it is hidden while a finger is down.
+
+Over an Android tile the picture is the system's own. `InputFlinger`'s sprite is created by
+`SpriteController` from `libinputservice.so` through the bridge module's sprite host, started
+by the compositor as root:
+
+```
+LD_PRELOAD=/data/local/tmp/libsfwmsprite.so /system/bin/app_process \
+    -Djava.class.path=<module apk> /system/bin \
+    --nice-name=sfwm-sprite org.sfwm.bridge.cursor.SpriteHost
+```
+
+Commands go down its standard input (`show`, `move`, `hide`), and the pipe closing is what
+ends it, so the cursor cannot outlive the compositor. What that buys, measured with
+`dumpsys SurfaceFlinger`:
+
+```
+Layer [NNN] [BBQ] Sprite#NNN#NNN   ownerPid=<sfwm-sprite>   alpha=1.000000
+composition type=CURSOR (4)        displayFrame=[833 1597 917 1681]
+```
+
+- `CURSOR (4)` means the 84x84 layer is scanned out by the hardware cursor plane instead of
+  costing a composition pass;
+- the layer has no `input{...}` line at all, so it has no input window handle and cannot
+  occlude a touch. A layer the compositor creates cannot be made to behave that way:
+  `setTrustedOverlay` and `setDropInputMode` are ignored for anyone who is not the window
+  manager, which is why an idle self-drawn cursor used to swallow the next tap.
+
+The host exists because `libinputservice.so` is not a public library: only a process in the
+platform's linker namespace may open it, so it is preloaded into an `app_process` rather than
+loaded with `System.load`, and the icon is built through JNI, since an `ABitmap` can only come
+from a Java `android.graphics.Bitmap`. The design notes are in
+[doc/bridge.md](doc/bridge.md#the-pointer).
+
+The picture over a tile is a plain arrow drawn once at the sprite's size; the theme's
+`pointer_icon` is not used yet. Both directions of the handover are exercised on the device
+with a `/dev/uinput` virtual mouse: over a tile the sprite appears and the compositor's layer
+disappears, and outside one the sprite is hidden and the compositor's cursor comes back.
+
 ## Environment variables
 
 | variable | effect |
@@ -283,7 +330,10 @@ gesture owner and the pointer position.
 
 ## Limitations
 
-- Single output, single seat, and no hardware cursor plane.
+- Single output and single seat.
+- The hardware cursor plane is used only for the pointer over an Android tile, through the
+  bridge module's sprite host (see [The pointer](#the-pointer)). A Wayland client's cursor is
+  still a composited layer of the compositor's own.
 - Windows are moved and resized with gestures owned by the compositor rather than by
   client decorations.
 - Screenshot and recording support streams `screencap` straight into the client shm

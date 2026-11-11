@@ -7,7 +7,8 @@
     <application
         android:label="@string/app_name"
         android:directBootAware="true"
-        android:allowBackup="false">
+        android:allowBackup="false"
+        android:extractNativeLibs="true">
 
         <!-- One hosted output is one task: an application-band window, so ordering against
              the shell's own floating windows follows focus instead of window type.

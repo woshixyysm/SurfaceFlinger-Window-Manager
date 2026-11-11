@@ -216,5 +216,8 @@ int main(int argc, char **argv) {
     appwin_poll();
 
     wl_display_run(g_srv.dpy);
+    // The pointer picture may be the system's sprite at this moment, and nothing else will
+    // take it away: the module keeps it up until it is told otherwise.
+    if (g_sprite_shown) appwin_sprite("hide", 0, 0);
     return 0;
 }

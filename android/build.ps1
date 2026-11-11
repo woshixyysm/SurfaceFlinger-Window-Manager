@@ -105,6 +105,25 @@ if (Test-Path $classesJar) { Remove-Item -Force $classesJar }
 & (Join-Path $javaHome "bin\jar.exe") cf $classesJar -C $classes .
 if ($LASTEXITCODE -ne 0) { Fail "jar" }
 
+# --- native: the system cursor's sprite host ---------------------------------
+Step "native"
+$ndk = $env:ANDROID_NDK_HOME
+if (-not $ndk) {
+    $candidates = Get-ChildItem (Join-Path $sdk "ndk") -Directory -ErrorAction SilentlyContinue |
+        Sort-Object { [version]($_.Name -replace '[^0-9.].*$', '') } -Descending
+    if ($candidates) { $ndk = $candidates[0].FullName }
+}
+if (-not $ndk -or -not (Test-Path $ndk)) { Fail "no NDK installed; set ANDROID_NDK_HOME" }
+$ndkClang = Join-Path $ndk "toolchains\llvm\prebuilt\windows-x86_64\bin\clang++.exe"
+if (-not (Test-Path $ndkClang)) { Fail "clang++ missing in $ndk" }
+
+$nativeDir = Join-Path $build "native"
+New-Item -ItemType Directory -Force $nativeDir | Out-Null
+$nativeLib = Join-Path $nativeDir "libsfwmsprite.so"
+& $ndkClang --target=aarch64-linux-android29 -shared -fPIC -O2 -fno-exceptions `
+    -static-libstdc++ -o $nativeLib (Join-Path $root "src\main\cpp\sprite_host.cpp") -llog
+if ($LASTEXITCODE -ne 0) { Fail "native sprite host" }
+
 # --- dex ---------------------------------------------------------------------
 Step "d8"
 $dexDir = Join-Path $build "dex"
@@ -140,7 +159,8 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $stored = @("resources.arsc", "AndroidManifest.xml")
 $extra = @(
-    @{ Path = (Join-Path $dexDir "classes.dex"); Entry = "classes.dex" }
+    @{ Path = (Join-Path $dexDir "classes.dex"); Entry = "classes.dex" },
+    @{ Path = $nativeLib; Entry = "lib/arm64-v8a/libsfwmsprite.so" }
 )
 foreach ($name in "java_init.list", "module.prop", "scope.list") {
     $extra += @{ Path = (Join-Path $metaDir $name); Entry = "META-INF/xposed/$name" }

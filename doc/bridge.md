@@ -1,9 +1,10 @@
 # The sfwm bridge module
 
-`android/` is an optional LSPosed module that lends sfwm two Android capabilities it cannot
-have on its own: the height and the text stream of the input method, and additional virtual
-outputs. sfwm neither links nor requires it: the module only publishes a line protocol, and
-a compositor without a reader simply sees one output and no keyboard notifications.
+`android/` is an optional LSPosed module that lends sfwm Android capabilities it cannot
+have on its own: the height and the text stream of the input method, additional virtual
+outputs, and the sprite host behind the system's own pointer. sfwm neither links nor requires
+it: the module only publishes a line protocol, and a compositor without a reader simply sees
+one output and no keyboard notifications.
 
 The module is written against framework classes only, so the same code is expected to run
 on AOSP-derived shells; the portability notes at the end say what is and is not assumed.
@@ -36,6 +37,9 @@ Current capabilities:
 enumerates packages; the code itself only special-cases the shell process, because that is
 where the outputs are hosted.
 
+The module also carries the pointer's sprite host, which is not a capability: it is a process
+of its own that the compositor starts as root (see [The pointer](#the-pointer)).
+
 ## Configuration
 
 `/data/adb/sfwm-bridge/config`, one `key=value` per line, `#` starts a comment:
@@ -52,7 +56,7 @@ output.0.x=612
 output.0.y=1400
 ```
 
-Both capabilities start disabled. An output window with nothing rendering into its layer
+Both hooks start disabled. An output window with nothing rendering into its layer
 stack is a black rectangle on top of the shell, so `display` only makes sense once a
 compositor reads the protocol; enabling it before that is purely a test.
 
@@ -162,6 +166,64 @@ hosted display, so a tile appears either way.
 
 The same slot can be configured up front with `output.<n>.package=` (`home` or a package) and
 `outputs=<n>`; a slot with no package stays a plain output.
+
+## The pointer
+
+Over a hosted window the pointer is drawn by Android itself, and the process that draws it
+belongs to the compositor rather than to an Android application. The commands travel down its
+standard input, one per line:
+
+```
+show <x> <y>    draw the system sprite at a screen position
+move <x> <y>    move it: one position transaction and nothing else
+hide            take it away
+```
+
+It is the input service's own sprite — `SpriteController` from `libinputservice.so`, bound
+with `dlsym` and driven directly — and not a layer the module creates. That distinction is
+the whole point:
+
+- a client layer, however it is created, is given a touchable region over its pixels even
+  when it has no input channel, so a cursor sitting over a tile swallows the touch that
+  follows it: a swipe starting under the pointer never reaches the application;
+- a sprite is created without an input channel and never gets an input window handle, so it
+  takes part in no dispatch at all, and `setTrustedOverlay`/`setDropInputMode` — which
+  SurfaceFlinger ignores for any caller that is not the window manager — are not needed;
+- the layer it produces is the one this device's composer offers to the cursor plane, so the
+  pointer is scanned out by hardware instead of costing a composition pass.
+
+That is also why the picture is small, fixed in size and only ever moved: resizing the buffer
+or fading the alpha turns the layer back into client composition. The picture changes hands
+with the input devices — over a Wayland window sfwm owns the mouse and draws its own cursor,
+over an Android window it forwards the events and the sprite draws.
+
+The host is a process of its own, started by the compositor the first time the pointer reaches
+a tile:
+
+```
+LD_PRELOAD=<copied libsfwmsprite.so> /system/bin/app_process \
+    -Djava.class.path=<module apk> /system/bin \
+    --nice-name=sfwm-sprite org.sfwm.bridge.cursor.SpriteHost
+```
+
+Three reasons for the extra process and the preload, none of them optional:
+
+- `libinputservice.so` is not a public library, so only a process in the platform's linker
+  namespace may open it. A hooked application process gets a classloader namespace and is
+  refused, and so is a normal application. A library that is *preloaded* keeps the default
+  namespace, which is why the host is started this way and not with `System.load`;
+- an icon is an `ABitmap`, and libhwui can only make one from a Java
+  `android.graphics.Bitmap`, so a virtual machine has to be there — `app_process` is how the
+  LSPosed CLI does the same thing. The library builds the bitmap through JNI from its own
+  thread, so the Java class does nothing but keep the process alive;
+- the compositor already runs as root, which is the uid that can open the library and create
+  a layer at the root of the display.
+
+The library is built from `android/src/main/cpp/sprite_host.cpp` and shipped in the module's
+APK; the compositor copies it next to its other device-side files in `/data/local/tmp` first,
+because a process that is not the module may not map it out of `/data/app`. End of input ends
+the process and takes the picture with it, so a cursor cannot outlive the compositor that
+started it.
 
 ## Android windows that are not hosted
 

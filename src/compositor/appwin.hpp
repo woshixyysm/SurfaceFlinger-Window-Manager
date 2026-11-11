@@ -12,6 +12,14 @@
 // visible, and compositor/tiling.hpp defines tile_sync() after this header.
 #pragma once
 
+#include <dirent.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <signal.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
 static void tile_sync();   // compositor/tiling.hpp
 static void app_lock_apply(bool locked);   // input/keyboard.hpp: hides the layers
 
@@ -219,6 +227,179 @@ static bool appwin_hover(AppWin *a, const char *phase, int32_t x, int32_t y) {
     char line[96];
     snprintf(line, sizeof(line), "hover %d %s %d %d", a->slot, phase, x, y);
     return appwin_send(line);
+}
+
+// The pointer's picture over an Android tile is the system's own pointer sprite, not a layer
+// of ours. A layer sfwm creates is a client layer: SurfaceFlinger composites it, and it is
+// given a touchable region over its pixels that swallows the touch landing under it — the
+// reason a cursor used to break a swipe. The sprite is created without an input channel at
+// all, so it cannot occlude anything, and it is the layer this device's composer puts on the
+// hardware cursor plane. The position is in screen pixels: the sprite lives on the physical
+// display, over the whole tile grid.
+//
+// The controller that makes the sprite lives in libinputservice.so, which only a process in
+// the platform's linker namespace may open, so it is not run inside a hooked Android process
+// but in one of its own: `app_process` with the module's dex, started here, as root, the
+// first time the pointer reaches a tile. Commands go down its standard input, and the pipe
+// closing is what tells it to take the picture away — a cursor cannot outlive the compositor.
+static int   g_sprite_fd = -1;
+static pid_t g_sprite_pid = -1;
+
+/** /data/app/<tree>/org.sfwm.bridge-<hash>/base.apk: the module that carries the host. */
+static bool sprite_apk(char *out, size_t size) {
+    DIR *root = opendir("/data/app");
+    if (!root) return false;
+    bool found = false;
+    while (struct dirent *tree = readdir(root)) {
+        if (tree->d_name[0] == '.') continue;
+        char treePath[PATH_MAX];
+        snprintf(treePath, sizeof treePath, "/data/app/%s", tree->d_name);
+        DIR *inner = opendir(treePath);
+        if (!inner) continue;
+        while (struct dirent *pkg = readdir(inner)) {
+            if (strncmp(pkg->d_name, "org.sfwm.bridge-", 16) != 0) continue;
+            char candidate[PATH_MAX];
+            snprintf(candidate, sizeof candidate, "%s/%s/base.apk", treePath, pkg->d_name);
+            struct stat st;
+            if (stat(candidate, &st) == 0 && st.st_size > 0) {
+                snprintf(out, size, "%s", candidate);
+                found = true;
+                break;
+            }
+        }
+        closedir(inner);
+        if (found) break;
+    }
+    closedir(root);
+    return found;
+}
+
+/** The split install puts the library next to the dex; a deploy may also leave it here. */
+static bool sprite_library(const char *apk, char *out, size_t size) {
+    snprintf(out, size, "%s", apk);
+    char *tail = strstr(out, "/base.apk");
+    if (tail) snprintf(tail, size - (size_t)(tail - out), "/lib/arm64/libsfwmsprite.so");
+    struct stat st;
+    if (stat(out, &st) == 0 && st.st_size > 0) return true;
+    snprintf(out, size, "/data/local/tmp/libsfwmsprite.so");
+    return stat(out, &st) == 0 && st.st_size > 0;
+}
+
+/**
+ * Preloading straight out of the APK is refused to a process that is not the module, so the
+ * library is copied next to the compositor's other device-side files first. It is a few
+ * hundred kilobytes, and the copy is what makes it loadable at all.
+ */
+static bool sprite_copy(const char *source, char *out, size_t size) {
+    snprintf(out, size, "/data/local/tmp/libsfwmsprite.so");
+    if (strcmp(source, out) == 0) return true;
+    struct stat st;
+    if (stat(source, &st) != 0) return false;
+    FILE *in = fopen(source, "rb");
+    if (!in) return false;
+    FILE *to = fopen(out, "wb");
+    if (!to) {
+        fclose(in);
+        return false;
+    }
+    char buffer[65536];
+    size_t n;
+    bool ok = true;
+    while ((n = fread(buffer, 1, sizeof buffer, in)) > 0) {
+        if (fwrite(buffer, 1, n, to) != n) {
+            ok = false;
+            break;
+        }
+    }
+    fclose(in);
+    fclose(to);
+    if (!ok) {
+        fprintf(stderr, "[sprite] could not copy %s\n", source);
+        return false;
+    }
+    chmod(out, 0644);
+    return true;
+}
+
+static bool sprite_start(void) {
+    if (g_sprite_fd >= 0) return true;
+    char apk[PATH_MAX];
+    if (!sprite_apk(apk, sizeof apk)) {
+        fprintf(stderr, "[sprite] the bridge module is not installed, no system cursor\n");
+        return false;
+    }
+    char library[PATH_MAX];
+    if (!sprite_library(apk, library, sizeof library)) {
+        fprintf(stderr, "[sprite] libsfwmsprite.so is missing next to %s\n", apk);
+        return false;
+    }
+    char preload[PATH_MAX];
+    if (!sprite_copy(library, preload, sizeof preload)) return false;
+    int fds[2];
+    if (pipe2(fds, O_CLOEXEC) != 0) {
+        fprintf(stderr, "[sprite] no pipe: %s\n", strerror(errno));
+        return false;
+    }
+    // A closed pipe must not take the compositor down with it.
+    signal(SIGPIPE, SIG_IGN);
+    const pid_t pid = fork();
+    if (pid < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return false;
+    }
+    if (pid == 0) {
+        dup2(fds[0], 0);
+        close(fds[0]);
+        close(fds[1]);
+        char classPath[PATH_MAX];
+        snprintf(classPath, sizeof classPath, "-Djava.class.path=%s", apk);
+        // Preloading is what puts the library — and so the sprite controller — in the
+        // platform's linker namespace; a library loaded with System.load gets a classloader
+        // namespace and may not open libinputservice.so.
+        //
+        // The compositor's own environment has to go with it: LD_LIBRARY_PATH points at the
+        // Termux tree and LD_PRELOAD at the shims that make EGL work, and an Android runtime
+        // started with those binds to the wrong libc and never comes up.
+        unsetenv("LD_LIBRARY_PATH");
+        unsetenv("MESA_LOADER_DRIVER_OVERRIDE");
+        unsetenv("LIBGL_DRIVERS_PATH");
+        unsetenv("SFWM_LIBEGL");
+        setenv("LD_PRELOAD", preload, 1);
+        char *const argv[] = {
+            (char *)"/system/bin/app_process",
+            classPath,
+            (char *)"/system/bin",
+            (char *)"--nice-name=sfwm-sprite",
+            (char *)"org.sfwm.bridge.cursor.SpriteHost",
+            nullptr,
+        };
+        execv(argv[0], argv);
+        _exit(127);
+    }
+    close(fds[0]);
+    g_sprite_fd = fds[1];
+    g_sprite_pid = pid;
+    printf("[sprite] host started for '%s', pid %d\n", apk, (int)pid);
+    return true;
+}
+
+static bool appwin_sprite(const char *phase, int32_t x, int32_t y) {
+    const bool hide = strcmp(phase, "hide") == 0;
+    if (g_sprite_fd < 0 && (hide || !sprite_start())) return false;
+    char line[64];
+    const int n = snprintf(line, sizeof line, "%s %d %d\n", phase, x, y);
+    // One line per command; a failed write means the host is gone and the pointer is sfwm's
+    // again until it is started once more. It is reaped here so a dead host does not stay a
+    // zombie for the rest of the session.
+    if (write(g_sprite_fd, line, (size_t)n) != n) {
+        close(g_sprite_fd);
+        g_sprite_fd = -1;
+        if (g_sprite_pid > 0) waitpid(g_sprite_pid, nullptr, WNOHANG);
+        g_sprite_pid = -1;
+        return false;
+    }
+    return true;
 }
 
 

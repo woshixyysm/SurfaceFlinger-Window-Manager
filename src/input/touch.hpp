@@ -517,6 +517,7 @@ static void handle_frame() {
                g_in.xmin, g_in.xmax, g_in.ymin, g_in.ymax);
         View *hv = hit_test(fx, fy);
         cursor_from_touch();   // a finger: no cursor while it is down
+        cursor_sprite(false, 0, 0);   // and no pointer picture over the tile either
         // Which tile the press belongs to is the layout's answer, not the hit test's: a
         // client that has not resized yet still covers the screen with its old geometry, and
         // would otherwise swallow the touches of the tile beside it.
@@ -843,6 +844,20 @@ static int open_pointer_device() {
 static int32_t g_mouse_x = 0, g_mouse_y = 0;
 // The Android window the pointer is currently over, so enter and exit are sent once.
 static AppWin *g_hover_app = nullptr;
+// Whether the system sprite is the one drawing the pointer right now.
+static bool g_sprite_shown = false;
+
+/**
+ * The pointer's picture follows the owner of the pointer: over an Android tile the system's
+ * sprite draws it, anywhere else the compositor does. A move is one line down the sprite
+ * host's pipe, so the flag is what keeps the compositor quiet while the sprite is not up.
+ */
+static void cursor_sprite(bool show, int32_t x, int32_t y) {
+    if (show && g_sprite_shown) { appwin_sprite("move", x, y); return; }
+    if (!show && !g_sprite_shown) return;
+    g_sprite_shown = appwin_sprite(show ? "show" : "hide", x, y);
+    if (show) cursor_hide();
+}
 
 static int on_pointer_fd(int fd, uint32_t, void *) {
     struct input_event ev[64];
@@ -869,13 +884,15 @@ static int on_pointer_fd(int fd, uint32_t, void *) {
                 if (g_hover_app) appwin_hover(g_hover_app, "exit", 0, 0);
                 if (over) appwin_hover(over, "enter", g_mouse_x - over->x, g_mouse_y - over->y);
                 g_hover_app = over;
+                cursor_sprite(over != nullptr, g_mouse_x, g_mouse_y);
             }
             if (over) {
                 appwin_hover(over, "move", g_mouse_x - over->x, g_mouse_y - over->y);
+                cursor_sprite(true, g_mouse_x, g_mouse_y);
             } else {
                 pointer_motion(g_mouse_x, g_mouse_y, true);
+                cursor_present();
             }
-            cursor_present();
         }
     }
     return 0;

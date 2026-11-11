@@ -9,9 +9,15 @@ pwsh -File android/build.ps1
 adb install -r android/build/sfwm-bridge.apk
 ```
 
-Needs the Android SDK (`ANDROID_HOME` or `%LOCALAPPDATA%\Android\Sdk`), JDK 17+
-(`JAVA_HOME`) and kotlinc (`KOTLIN_HOME`). The libxposed API 102 jar is taken from
-`android/libs/`, from `-LibXposedJar <jar>`, or downloaded from Maven Central.
+Needs the Android SDK (`ANDROID_HOME` or `%LOCALAPPDATA%\Android\Sdk`), the NDK
+(`ANDROID_NDK_HOME`, or whatever is installed under `<sdk>/ndk`), JDK 17+ (`JAVA_HOME`) and
+kotlinc (`KOTLIN_HOME`). The libxposed API 102 jar is taken from `android/libs/`, from
+`-LibXposedJar <jar>`, or downloaded from Maven Central.
+
+The script builds `libsfwmsprite.so` from `src/main/cpp/sprite_host.cpp` with the NDK for
+`arm64-v8a` and packages it into the APK; the compositor starts the pointer's sprite host out
+of that same APK (see [the pointer](../doc/bridge.md#the-pointer)), so no extra file has to be
+pushed by hand.
 
 Enable the module in LSPosed, select `com.android.systemui` (virtual outputs) and the
 processes that run an input method (input observation), then restart SystemUI.
