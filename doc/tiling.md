@@ -32,17 +32,35 @@ them where they are as ordinary floating windows.
   surface and the Xwayland root window are never tiled. Everything else is a candidate,
   including a full-output window such as a launcher or a desktop: tiling does not force it
   into the background the way the floating path does.
+- Android windows hosted by the bridge module join the same order, after the Wayland ones.
+  They are placed by moving their overlay window instead of by a configure, but they share
+  the gaps, the split ratios and the resize rules.
 
 ## Layouts
 
 **dwindle** (default): window `i` of `n` splits the remaining rectangle along its longer
-side and takes `1/(n-i)` of it; the last window takes what is left. This is the spiral
-behaviour Hyprland's dwindle produces when windows are opened one after another.
+side. The split belongs to the window that opens the group and carries its own ratio; with
+no custom ratio it takes `1/(n-i)` of the space, which is the spiral behaviour Hyprland's
+dwindle produces when windows are opened one after another.
 
 **master**: the first `master` windows form a left column of width `ratio`, the rest stack
 in the right column. `ratio` is clamped to `0.2 .. 0.85`.
 
 Both layouts inset the screen by `gap` and keep the same gap between neighbours.
+
+## Resizing a boundary, not a layout
+
+Changing one window must not reflow the screen. A split stores its own ratio, so a resize
+changes the boundary the focused window shares with its neighbour in that direction and
+nothing else: windows on the other side of the tree keep their geometry, and no window
+grows to fill a gap left behind.
+
+The pinch gesture on a managed window drives the same path: finger travel is turned into a
+ratio through the split's own extent, so the same movement means the same thing whatever
+the window size. `tile even` forgets every custom ratio and returns to equal splits.
+
+The master layout is the one exception by construction: the master column boundary is
+global, so `tile resize` there changes `ratio`.
 
 ## Commands
 
@@ -54,13 +72,22 @@ tile on | off | toggle
 tile layout dwindle|master
 tile focus l|r|u|d          directional focus, also next|prev
 tile swap l|r|u|d           swap with the neighbour in that direction
-tile resize l|r|u|d [delta] change the master ratio (default step 0.05)
-tile ratio <0.2..0.85>
+tile resize l|r|u|d [ratio] move that boundary (default 0.05, negative shrinks)
+tile ratio <0.2..0.85>      master column share
 tile master <n>             windows in the master column
 tile gap <px>
+tile even                   forget custom splits
 tile float                  toggle the focused window between tiled and floating
 tile fullscreen             toggle xdg fullscreen on the focused window
 tile sync                   re-apply the layout now
+```
+
+`app` drives the Android windows that the bridge module hosts:
+
+```
+app open <slot> <package|home>   start an application (or the launcher) in that slot
+app close <slot>                 release the window and its display
+app list                         print what the module currently reports
 ```
 
 Example:
@@ -83,9 +110,14 @@ client. With tiling off the gesture set is inactive and three fingers behave as 
 | three-finger tap | toggle the focused window between tiled and floating |
 
 The swipe is evaluated on release against a threshold of 40 dp, so a resting finger cannot
-move the focus. Existing gestures are unchanged: two fingers still scale the window, a long
-press still moves it, a corner drag still resizes it, and those gestures only affect
-windows that are floating or when tiling is off.
+move the focus. Two fingers on a managed window drag its boundary instead of scaling the
+client, which is how a tile is resized from the touchscreen.
+
+A managed window cannot be moved or resized freely: a long press moves the focus instead of
+starting a move, a corner drag is not armed, and a client asking for `xdg_toplevel.move` is
+focused without being moved. The layout owns the geometry, so nothing is left to fight over
+it. With tiling off, or on a window that is floating, all of the free gestures are exactly
+what they were.
 
 ## Focus, swap and stacking
 
@@ -106,13 +138,16 @@ moves.
 - A window that is floating keeps the free-move, corner-resize and pinch gestures; the
   tiler ignores it until it is floated back.
 - The input method, panels and the cursor stay outside the layout.
-- The bridge module is not involved. Tiling is a single-output feature for now; the virtual
-  outputs it publishes still need the multi-output work on the compositor side.
+- Android windows live on their own virtual display and are drawn by the platform, so they
+  are stacked above the Wayland layers; a tile of either kind keeps its rectangle, but the
+  two kinds cannot interleave in z-order. Sizing is applied by moving that overlay window,
+  which is why a tiled Android window keeps its density: the app gains space instead of
+  being re-laid-out at a new DPI.
 
 ## Limitations
 
 - No animations and no per-window rules; the layout is applied directly.
-- `ratio` only affects the master layout; dwindle always splits evenly.
-- Dragging a tiled window with one finger does nothing (a long press still enters move,
-  which the next layout pass overwrites); use `tile float` first.
+- `ratio` only affects the master layout; dwindle uses one ratio per split.
+- Directional focus, swap and `resize` still address Wayland windows only; Android tiles
+  take part in the geometry but not in the focus commands yet.
 - A window that never answers a configure keeps its old size inside its tile.

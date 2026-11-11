@@ -13,6 +13,7 @@ import org.sfwm.bridge.BridgeLink
 import org.sfwm.bridge.BridgeReport
 import org.sfwm.bridge.BridgeSettings
 import org.sfwm.bridge.Logs
+import org.sfwm.bridge.display.ControlChannel
 import org.sfwm.bridge.display.VirtualOutputs
 import java.lang.reflect.Method
 
@@ -75,6 +76,7 @@ class SystemUiDisplayCapability : Capability {
         if (application == null || started != null) return
         VirtualOutputs(application, settings).also {
             it.start()
+            ControlChannel(it).start()   // the compositor drives window geometry through it
             started = it
         }
     }

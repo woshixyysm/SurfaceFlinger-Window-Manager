@@ -13,8 +13,11 @@
 //   OWNER_CLIENT all events go to the client, including multi-finger pinch
 //   OWNER_MOVE   window move after a 400 ms press, with anchoring and snapping
 //   OWNER_RESIZE resize started in a corner band, with the opposite corner fixed
+//   OWNER_TILE   three-finger window-management gesture
+//   OWNER_TILE_RATIO  two fingers dragging the split of a managed window
 //   OWNER_NONE   idle
-enum TouchOwner { OWNER_NONE = 0, OWNER_CLIENT, OWNER_MOVE, OWNER_RESIZE, OWNER_PINCH, OWNER_TILE };
+enum TouchOwner { OWNER_NONE = 0, OWNER_CLIENT, OWNER_MOVE, OWNER_RESIZE, OWNER_PINCH, OWNER_TILE,
+                  OWNER_TILE_RATIO };
 
 static TouchOwner g_owner = OWNER_NONE;
 static int touch_owner_value(void) { return (int)g_owner; }
@@ -108,6 +111,12 @@ static int on_longpress(void *) {
     if (g_clickthrough || g_owner != OWNER_CLIENT) return 0;
     View *v = g_client_view ? g_client_view : hit_test(g_press_x, g_press_y);
     if (!v || v->is_subsurface || v->is_cursor) return 0;
+    // A managed window belongs to the layout: dragging it would only make the neighbours
+    // reflow underneath the finger. Take the focus instead and leave the geometry alone.
+    if (tile_owns(v)) {
+        kb_set_focus(v);
+        return 0;
+    }
 
     // No up event may be sent here: it would cancel the button or slider being pressed.
     // The press is kept and enters a pending move: releasing without motion is a click,
@@ -162,7 +171,8 @@ static void handle_frame() {
             if (bsy >= g_out_h - g_ime_h) return;
         }
     }
-    g_in_gesture = (g_owner == OWNER_MOVE || g_owner == OWNER_RESIZE || g_owner == OWNER_PINCH);
+    g_in_gesture = (g_owner == OWNER_MOVE || g_owner == OWNER_RESIZE || g_owner == OWNER_PINCH ||
+                    g_owner == OWNER_TILE_RATIO);
     int nf = 0;
     int64_t sumx = 0, sumy = 0;
     int32_t fx = 0, fy = 0;
@@ -200,6 +210,8 @@ static void handle_frame() {
                    v ? (v->bh / (v->buf_scale > 0 ? v->buf_scale : 1)) : 0);
         } else if (g_owner == OWNER_TILE) {
             tile_swipe_end(g_tile_swipe_x, g_tile_swipe_y, g_tile_last_x, g_tile_last_y);
+        } else if (g_owner == OWNER_TILE_RATIO) {
+            printf("[tile] boundary drag finished\n");
         }
         // The client is only updated when the gesture ends; during it nothing is touched.
         // Hide the cursor on release so it cannot cover the next click.
@@ -290,6 +302,11 @@ static void handle_frame() {
     if (g_srv.move_view && g_owner != OWNER_MOVE && g_owner != OWNER_RESIZE) {
         View *v = g_srv.move_view;
         g_srv.move_view = nullptr;
+        // A client asking to be moved has no say while the layout owns its geometry.
+        if (tile_owns(v)) {
+            kb_set_focus(v);
+            return;
+        }
         if (g_owner == OWNER_CLIENT && g_in.down) { g_in.down = false; input_button(false); }
         sec_release_all();
         g_owner = OWNER_MOVE;
@@ -353,6 +370,30 @@ static void handle_frame() {
         g_tile_last_x = fx;
         g_tile_last_y = fy;
         g_in.pending = 0;
+        return;
+    }
+
+    // ---------- owner: TILE_RATIO ----------
+    // Two fingers on a managed window move its boundary: the finger travel is applied to the
+    // split, so only that window and its neighbour change size.
+    if (g_owner == OWNER_TILE_RATIO) {
+        g_in.pending = 0;
+        if (nf < 2) return;                       // one finger left; wait for a full release
+        int32_t ax = 0, ay = 0, bx = 0, by = 0, got = 0;
+        for (int i = 0; i < 10 && got < 2; i++) {
+            if (g_in.slots[i].id < 0) continue;
+            int32_t sx, sy;
+            raw_to_screen(g_in.slots[i].x, g_in.slots[i].y, &sx, &sy);
+            if (got == 0) { ax = sx; ay = sy; got = 1; } else { bx = sx; by = sy; got = 2; }
+        }
+        if (got < 2) return;
+        const int32_t ddx = bx - ax, ddy = by - ay;
+        const int32_t d = (int32_t)sqrt((double)(ddx * ddx + ddy * ddy));
+        const int32_t step = d - g_pinch_d0;
+        if (step > 3 || step < -3) {
+            tile_resize_pixels(step);
+            g_pinch_d0 = d;
+        }
         return;
     }
 
@@ -455,7 +496,7 @@ static void handle_frame() {
         // A corner press no longer resizes immediately: it is armed first and only starts
         // once the finger moves past the threshold.
         g_arm_corner = 0;
-        if (corner) {
+        if (corner && !tile_owns(hv)) {
             g_arm_corner = corner;
             g_arm_x = fx;
             g_arm_y = fy;
@@ -469,7 +510,7 @@ static void handle_frame() {
         g_prev_primary = g_primary_slot;
 
         // The title strip moves the window; the content area belongs to the client.
-        if (hv && !hv->is_subsurface && !hv->is_cursor && in_title(hv, fx, fy)) {
+        if (hv && !hv->is_subsurface && !hv->is_cursor && !tile_owns(hv) && in_title(hv, fx, fy)) {
             g_owner = OWNER_MOVE;
             g_gesture_view = hv;
             g_move_started = false;
@@ -534,7 +575,8 @@ static void handle_frame() {
         return;
     }
 
-    // Two fingers resize the window instead of going to the client.
+    // Two fingers resize the window instead of going to the client. A managed window cannot
+    // be resized freely, so the same gesture drags the boundary of its split instead.
     if (nf >= 2 && g_owner == OWNER_CLIENT && g_client_view && g_client_view->mapped) {
         View *v = g_client_view;
         int32_t ax = 0, ay = 0, bx = 0, by = 0, got = 0;
@@ -550,6 +592,14 @@ static void handle_frame() {
         if (d0 > 40) {
             if (g_in.down) { g_in.down = false; input_button(false); }
             sec_release_all();
+            if (tile_owns(v)) {
+                g_owner = OWNER_TILE_RATIO;
+                g_pinch_d0 = d0;   // base distance, updated as the boundary follows the fingers
+                kb_set_focus(v);
+                printf("[tile] two fingers -> dragging the boundary of '%s'\n",
+                       v->title[0] ? v->title : "view");
+                return;
+            }
             g_owner = OWNER_PINCH;
         g_cfg_min_interval = 250;   // no configure per frame while pinching
             g_gesture_view = v;

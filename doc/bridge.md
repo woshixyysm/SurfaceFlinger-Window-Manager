@@ -73,8 +73,11 @@ socket in one connection, or written atomically to a state file:
 ```
 v 1
 ime <0|1> <height>
-display <index> <displayId> <layerStack> <w> <h> <dpi> <x> <y>
+display <index> <displayId> <layerStack> <w> <h> <dpi> <x> <y> <package>
 ```
+
+The last field is `-` for a plain output, `home` for a window hosting the shell, and a
+package name otherwise. A reader that only knows the geometry can stop before it.
 
 Events are deltas and are never part of a snapshot:
 
@@ -93,6 +96,42 @@ fallback. A hooked process may write only inside its own data directory and cann
 file in `/data/local/tmp`, so those two routes are the only ones that need no extra
 permission. Events cannot be replayed from a file, so `channel=file` mirrors nothing and
 typing still behaves normally inside Android.
+
+## Application windows
+
+An output can host an application instead of showing an empty layer stack. The compositor
+owns the layout, so it also decides where the window sits; the module owns only what the
+platform needs to draw it.
+
+The compositor drives it over an abstract socket named `sfwm-bridge-ctl`, one command per
+line, several per connection:
+
+```
+place <slot> <x> <y> <w> <h>   move and resize the window, density unchanged
+open  <slot> <package|home>    start an application on that slot's display
+close <slot>                   release the window and its display
+status                         republish the snapshot
+```
+
+A placement resizes the virtual display and moves the overlay window, in that order, so the
+application never sees a window larger than its display. The density is pinned to the
+panel's, which is what makes a tiled window behave like a tiled Wayland window: growing it
+gives the app more pixels instead of a different layout. Everything runs on the main thread,
+because the windows were created there and a view touched from the socket thread throws.
+
+Starting an activity on a display that is not the default one needs
+`ActivityOptions.setLaunchDisplayId`, which is hidden; it is called reflectively and the
+plain `startActivity` is the fallback. `home` starts `ACTION_MAIN`/`CATEGORY_HOME` instead of
+a package, which is how the launcher becomes an ordinary window. A display is started once
+per request, so resizing never relaunches the app.
+
+A launcher is usually single-instance: the platform then delivers the intent to the copy
+already running on the default display and the hosted window stays empty. Ordinary packages
+do start on a secondary display, and `close` releases the window if a package cannot be
+hosted.
+
+The same slot can be configured up front with `output.<n>.package=` (`home` or a package) and
+`outputs=<n>`; a slot with no package stays a plain output.
 
 ## Input observation
 

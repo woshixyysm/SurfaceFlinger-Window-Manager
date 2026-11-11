@@ -12,6 +12,8 @@ data class OutputEntry(
     val displayId: Int,
     val layerStack: Int,
     val placement: OutputPlacement,
+    /** `-` for a plain output, otherwise the package the display is hosting. */
+    val packageName: String = "-",
 )
 
 object BridgeReport {
@@ -22,8 +24,14 @@ object BridgeReport {
     private var keyboardHeight = 0
 
     @Synchronized
-    fun noteOutput(index: Int, displayId: Int, layerStack: Int, placement: OutputPlacement) {
-        outputs[index] = OutputEntry(displayId, layerStack, placement)
+    fun noteOutput(
+        index: Int,
+        displayId: Int,
+        layerStack: Int,
+        placement: OutputPlacement,
+        packageName: String = "-",
+    ) {
+        outputs[index] = OutputEntry(displayId, layerStack, placement, packageName)
     }
 
     @Synchronized
@@ -59,8 +67,11 @@ object BridgeReport {
         lines += "ime ${if (imeOn) 1 else 0} $keyboardHeight"
         for ((index, output) in outputs) {
             val placement = output.placement
+            // The last field is the hosted package: a reader that only knows the geometry
+            // stops before it, and a plain output reports "-".
             lines += "display $index ${output.displayId} ${output.layerStack} " +
-                "${placement.width} ${placement.height} ${placement.densityDpi} ${placement.x} ${placement.y}"
+                "${placement.width} ${placement.height} ${placement.densityDpi} " +
+                "${placement.x} ${placement.y} ${output.packageName}"
         }
         return lines
     }

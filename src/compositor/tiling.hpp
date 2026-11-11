@@ -34,7 +34,19 @@ static std::vector<View *> g_tile_order;
 static std::vector<View *> g_tile_floating;
 static View *g_tile_focus = nullptr;
 
+// A dwindle split belongs to the window that opens its group. Storing the ratio per split
+// is what keeps a resize local: moving one boundary cannot move the rest of the screen.
+// The owner is opaque: a View for a Wayland window, an AppWin for an Android one.
+struct TileSplit { void *owner; float ratio; };
+static std::vector<TileSplit> g_tile_splits;
+
+// Written on every layout pass, so a resize can turn a pixel delta into a ratio delta.
+struct TileNode { void *owner; sf::Rect rect; bool vertical; float ratio; };
+static std::vector<TileNode> g_tile_nodes;
+
 // ------------------------------------------------------------------ helpers
+static int tile_index_of(const std::vector<View *> &list, View *v);   // defined below
+
 static bool tile_known(View *v) {
     if (!v) return false;
     for (View *o : g_srv.views) if (o == v) return true;
@@ -50,6 +62,42 @@ static bool tile_candidate(View *v) {
 static bool tile_is_floating(View *v) {
     for (View *f : g_tile_floating) if (f == v) return true;
     return false;
+}
+
+// True while the window's geometry belongs to the layout. Gestures and commands ask this
+// before they touch a window, so a managed window can never be dragged out of its tile.
+static bool tile_owns(View *v) {
+    if (!g_tile_on || !v) return false;
+    if (!tile_candidate(v) || tile_is_floating(v)) return false;
+    return v->ws == g_ws_active && tile_index_of(g_tile_order, v) >= 0;
+}
+
+static float tile_split_of(void *owner) {
+    for (const TileSplit &s : g_tile_splits) if (s.owner == owner) return s.ratio;
+    return 0.f;
+}
+
+static void tile_split_set(void *owner, float ratio) {
+    if (ratio < 0.1f) ratio = 0.1f;
+    if (ratio > 0.9f) ratio = 0.9f;
+    for (TileSplit &s : g_tile_splits) {
+        if (s.owner != owner) continue;
+        s.ratio = ratio;
+        return;
+    }
+    g_tile_splits.push_back(TileSplit{owner, ratio});
+}
+
+static const TileNode *tile_node_of(void *owner) {
+    for (const TileNode &n : g_tile_nodes) if (n.owner == owner) return &n;
+    return nullptr;
+}
+
+// A split owner is a View or an AppWin, so liveness is checked for both kinds.
+static bool tile_owner_alive(void *owner) {
+    for (AppWin *a : g_apps)
+        if ((void *)a == owner) return a->w > 0 && a->h > 0;
+    return tile_candidate((View *)owner);
 }
 
 static void tile_untrack(View *v) {
@@ -70,6 +118,10 @@ static void tile_prune() {
         kept.push_back(v);
     }
     g_tile_order.swap(kept);
+    for (size_t i = 0; i < g_tile_splits.size(); ) {
+        if (tile_owner_alive(g_tile_splits[i].owner)) i++;
+        else g_tile_splits.erase(g_tile_splits.begin() + i);
+    }
     if (g_tile_focus && (!tile_candidate(g_tile_focus) || g_tile_focus->ws != g_ws_active))
         g_tile_focus = nullptr;
 }
@@ -94,12 +146,21 @@ static sf::Rect tile_rect(int32_t x, int32_t y, int32_t w, int32_t h) {
     return r;
 }
 
+// The windows the layout places, in order: the Wayland views first, then the Android
+// windows. The keys are opaque so one layout pass can size both kinds.
+static void tile_keys(const std::vector<View *> &views, std::vector<void *> &keys) {
+    keys.clear();
+    for (View *v : views) keys.push_back(v);
+    for (AppWin *a : g_apps)
+        if (a->ws == g_ws_active && a->w > 0 && a->h > 0) keys.push_back(a);
+}
+
 // ------------------------------------------------------------------ layout
 // Geometry for the active list. Both layouts work on the same ordered list, so focus,
 // swap and workspace changes never have to reason about a tree.
-static void tile_rects(const std::vector<View *> &list, std::vector<sf::Rect> &out) {
+static void tile_rects(const std::vector<void *> &keys, std::vector<sf::Rect> &out) {
     out.clear();
-    const int n = (int)list.size();
+    const int n = (int)keys.size();
     if (n <= 0) return;
 
     int32_t gap = g_tile_gap;
@@ -143,6 +204,7 @@ static void tile_rects(const std::vector<View *> &list, std::vector<sf::Rect> &o
 
     // Dwindle: every window but the last splits the remaining rectangle, always along its
     // longer side, so tiles stay as close to square as the count allows.
+    g_tile_nodes.clear();
     int32_t x = x0, y = y0, w = w0, h = h0;
     for (int i = 0; i < n; i++) {
         if (i == n - 1) {
@@ -151,8 +213,15 @@ static void tile_rects(const std::vector<View *> &list, std::vector<sf::Rect> &o
         }
         const int remaining = n - i;
         const bool vertical = h > w;
+        // No stored ratio means the plain even split, so the default layout is unchanged.
+        const float stored = tile_split_of(keys[i]);
+        const float even = 1.f / (float)remaining;
+        float ratio = stored > 0.f ? stored : even;
+        if (ratio < 0.1f) ratio = 0.1f;
+        if (ratio > 0.9f) ratio = 0.9f;
+        g_tile_nodes.push_back(TileNode{keys[i], tile_rect(x, y, w, h), vertical, ratio});
         if (vertical) {
-            int32_t th = h / remaining;
+            int32_t th = stored > 0.f ? (int32_t)((float)h * ratio + 0.5f) : h / remaining;
             if (th < 1) th = 1;
             if (th > h - 1) th = h - 1;
             out.push_back(tile_rect(x, y, w, th));
@@ -160,7 +229,7 @@ static void tile_rects(const std::vector<View *> &list, std::vector<sf::Rect> &o
             h -= th + gap;
             if (h < 1) h = 1;
         } else {
-            int32_t tw = w / remaining;
+            int32_t tw = stored > 0.f ? (int32_t)((float)w * ratio + 0.5f) : w / remaining;
             if (tw < 1) tw = 1;
             if (tw > w - 1) tw = w - 1;
             out.push_back(tile_rect(x, y, tw, h));
@@ -174,10 +243,12 @@ static void tile_rects(const std::vector<View *> &list, std::vector<sf::Rect> &o
 static void tile_apply() {
     if (!g_tile_on) return;
     std::vector<View *> list;
+    std::vector<void *> keys;
     std::vector<sf::Rect> rects;
     tile_active_list(list);
-    tile_rects(list, rects);
-    if (list.size() != rects.size()) return;
+    tile_keys(list, keys);
+    tile_rects(keys, rects);
+    if (keys.size() != rects.size()) return;
 
     sf::begin_batch();
     for (size_t i = 0; i < list.size(); i++) {
@@ -197,6 +268,13 @@ static void tile_apply() {
         toplevel_send_configure(v);
     }
     sf::end_batch();
+
+    // An Android window has no surface to configure: its display is hosted by the module,
+    // so the tile is applied by moving that window.
+    for (size_t i = list.size(); i < keys.size(); i++) {
+        const sf::Rect &r = rects[i];
+        appwin_place((AppWin *)keys[i], r.left, r.top, r.right - r.left, r.bottom - r.top);
+    }
 }
 
 // Publishes the current tiling order to the layout. Safe to call from any event: it prunes
@@ -217,8 +295,10 @@ static void tile_sync() {
 static bool tile_current_rects(std::vector<View *> &list, std::vector<sf::Rect> &rects) {
     tile_prune();
     tile_active_list(list);
-    tile_rects(list, rects);
-    return !list.empty() && list.size() == rects.size();
+    std::vector<void *> keys;
+    tile_keys(list, keys);
+    tile_rects(keys, rects);
+    return !list.empty() && list.size() == keys.size() && rects.size() == keys.size();
 }
 
 // Picks the window whose centre is nearest in the requested direction. Comparing centres
@@ -317,6 +397,77 @@ static void tile_swap_dir(int dx, int dy) {
            from->title[0] ? from->title : "view", other->title[0] ? other->title : "view");
 }
 
+// ------------------------------------------------------------------ resize
+// Hyprland moves a boundary instead of re-laying the screen. The split the focused window
+// shares with its neighbour in the requested direction changes; no other window moves, so
+// nothing grows to fill a gap behind the user's back.
+static bool tile_resize_boundary(View *a, View *b, float delta) {
+    const int ia = tile_index_of(g_tile_order, a);
+    const int ib = tile_index_of(g_tile_order, b);
+    if (ia < 0 || ib < 0) return false;
+    View *owner = ia < ib ? a : b;          // the window that opens the group owns the split
+    const TileNode *node = tile_node_of(owner);
+    if (!node) return false;
+    const float before = node->ratio;
+    // The first child holds the head of the node, so it grows with the ratio; the second
+    // child grows when the ratio falls.
+    const float next = before + (owner == a ? delta : -delta);
+    tile_split_set(owner, next);
+    tile_sync();
+    printf("[tile] split '%s' %.2f -> %.2f\n", owner->title[0] ? owner->title : "view",
+           before, tile_split_of(owner));
+    return true;
+}
+
+static bool tile_resize_dir(int dx, int dy, float delta) {
+    std::vector<View *> list;
+    std::vector<sf::Rect> rects;
+    if (!tile_current_rects(list, rects)) return false;
+    View *v = tile_focused(list);
+    if (!v) return false;
+    if (g_tile_layout == TILE_MASTER) {
+        // The master column is a single global boundary; there is nothing local about it.
+        g_tile_ratio += (float)(dx + dy) * delta;
+        if (g_tile_ratio < 0.2f) g_tile_ratio = 0.2f;
+        if (g_tile_ratio > 0.85f) g_tile_ratio = 0.85f;
+        printf("[tile] ratio %.2f\n", g_tile_ratio);
+        tile_sync();
+        return true;
+    }
+    View *other = tile_neighbour(list, rects, v, dx, dy);
+    if (!other) {
+        printf("[tile] nothing to resize against on that side\n");
+        return false;
+    }
+    return tile_resize_boundary(v, other, delta);
+}
+
+// A pinch on a managed window drags its boundary. Pixels are turned into a ratio through
+// the node's own extent, so the same finger travel means the same thing at any size.
+static bool tile_resize_pixels(int32_t px) {
+    std::vector<View *> list;
+    std::vector<sf::Rect> rects;
+    if (!tile_current_rects(list, rects)) return false;
+    View *v = tile_focused(list);
+    if (!v) return false;
+    const TileNode *node = tile_node_of(v);
+    if (!node) {
+        const int i = tile_index_of(list, v);
+        if (i <= 0) return false;
+        node = tile_node_of(list[i - 1]);
+        if (!node) return false;
+    }
+    const int32_t extent = node->vertical ? (node->rect.bottom - node->rect.top)
+                                          : (node->rect.right - node->rect.left);
+    if (extent < 1) return false;
+    View *owner = (View *)node->owner;
+    float delta = (float)px / (float)extent;
+    if (owner != v) delta = -delta;
+    tile_split_set(owner, node->ratio + delta);
+    tile_apply();
+    return true;
+}
+
 // ------------------------------------------------------------------ commands
 static void tile_toggle() {
     g_tile_on = !g_tile_on;
@@ -337,6 +488,8 @@ static void tile_toggle() {
     }
     g_tile_order.clear();
     g_tile_floating.clear();
+    g_tile_splits.clear();
+    g_tile_nodes.clear();
     g_tile_focus = nullptr;
 }
 
@@ -470,14 +623,19 @@ static void tile_command(const std::string &args) {
     if (!strcmp(verb, "resize")) {
         int dx = 0, dy = 0;
         if (!tile_dir_of(a, &dx, &dy)) return;
-        float delta = f > 0.f ? f : 0.05f;
-        g_tile_ratio += (float)(dx + dy) * delta;
-        if (g_tile_ratio < 0.2f) g_tile_ratio = 0.2f;
-        if (g_tile_ratio > 0.85f) g_tile_ratio = 0.85f;
-        printf("[tile] ratio %.2f\n", g_tile_ratio);
+        float delta = f != 0.f ? f : 0.05f;
+        if (delta < -0.5f) delta = -0.5f;
+        if (delta > 0.5f) delta = 0.5f;
+        tile_resize_dir(dx, dy, delta);
+        return;
+    }
+    if (!strcmp(verb, "even")) {
+        // Forgets every custom split, so the layout returns to equal shares.
+        g_tile_splits.clear();
+        printf("[tile] splits reset (%d window(s))\n", (int)g_tile_order.size());
         tile_sync();
         return;
     }
     printf("[tile] usage: tile on|off|toggle|sync|float|fullscreen|layout dwindle|master|"
-           "focus l|r|u|d|swap l|r|u|d|resize l|r|u|d [delta]|ratio f|master n|gap px\n");
+           "focus l|r|u|d|swap l|r|u|d|resize l|r|u|d [ratio]|ratio f|master n|gap px|even\n");
 }

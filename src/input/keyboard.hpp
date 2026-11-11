@@ -761,6 +761,19 @@ static void kb_command(const std::string &line, int fd) {
     } else if (line.compare(0, 5, "tile ") == 0) {
         tile_command(line.substr(5));
     }
+    else if (line == "app") {
+        appwin_list();
+    } else if (line.compare(0, 4, "app ") == 0) {
+        // app open <slot> <package|home> | app close <slot> | app list
+        std::string rest = line.substr(4);
+        char verb[16] = {0}, what[128] = {0};
+        int slot = -1;
+        const int n = sscanf(rest.c_str(), "%15s %d %127s", verb, &slot, what);
+        if (n >= 2 && !strcmp(verb, "open")) appwin_open(slot, what);
+        else if (n >= 2 && !strcmp(verb, "close")) appwin_close(slot);
+        else if (n >= 1 && !strcmp(verb, "list")) appwin_list();
+        else printf("[app] usage: app open <slot> <package|home> | app close <slot> | app list\n");
+    }
     else if (line == "help") {
         printf("[kbd] usage: t <text> | k <evdev> <0|1> | s <keysym> | m <x> <y> | c <x> <y> <0|1> | p <x> <y> | tile ...\n");
     } else {

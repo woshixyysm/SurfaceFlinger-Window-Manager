@@ -27,6 +27,9 @@
 #include "protocol/display_ctl.hpp"
 // Workspaces (ext_workspace_manager_v1); the data comes from g_srv.views and View::ws.
 #include "protocol/workspace.hpp"
+// Android windows hosted by the optional bridge module. Included before tiling.hpp, which
+// places them in the same layout as the Wayland windows.
+#include "compositor/appwin.hpp"
 // Tiling layouts. Included after the workspace state it reads and before the input modules
 // that expose the tile commands and the three-finger gesture.
 #include "compositor/tiling.hpp"
@@ -192,6 +195,12 @@ int main(int argc, char **argv) {
     }
 
     sfwm_keys_init();   // keyboard injection socket
+
+    // Poll the bridge's published state for Android windows, so a window opened by the
+    // module joins the layout even when sfwm did not ask for it.
+    g_app_timer = wl_event_loop_add_timer(g_srv.loop, on_appwin_tick, nullptr);
+    if (g_app_timer) wl_event_source_timer_update(g_app_timer, 300);
+    appwin_poll();
 
     wl_display_run(g_srv.dpy);
     return 0;

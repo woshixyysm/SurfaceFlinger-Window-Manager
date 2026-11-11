@@ -72,21 +72,30 @@ data class BridgeSettings(
     val channel: LinkMode = LinkMode.BOTH,
     val outputs: Int = 1,
     private val overrides: Map<Int, OutputPlacement> = emptyMap(),
+    private val packages: Map<Int, String> = emptyMap(),
 ) {
     fun placement(index: Int, profile: PanelMetrics): OutputPlacement =
         overrides[index] ?: OutputPlacement.standard(index, profile)
+
+    /** The package a slot opens on start; null leaves the slot as a plain output. */
+    fun packageOf(index: Int): String? = packages[index]
 
     companion object {
         const val CONFIG_DIR = "/data/adb/sfwm-bridge"
         val CONFIG_FILE = File(CONFIG_DIR, "config")
         val DISABLE_FILE = File(CONFIG_DIR, "disable")
 
+        /** `/data/adb` is root-only on most shells, so the same keys can also live here. */
+        val FALLBACK_CONFIG = File("/data/local/tmp/sfwm-bridge.config")
+        val FALLBACK_DISABLE = File("/data/local/tmp/sfwm-bridge.disable")
+
         fun current(): BridgeSettings = try {
-            if (DISABLE_FILE.exists()) {
-                Logs.w("disabled by $DISABLE_FILE")
+            if (DISABLE_FILE.exists() || FALLBACK_DISABLE.exists()) {
+                Logs.w("disabled by $DISABLE_FILE or $FALLBACK_DISABLE")
                 DEFAULT.copy(killed = true)
             } else {
-                parse(CONFIG_FILE.takeIf { it.canRead() }?.readLines().orEmpty())
+                val source = listOf(CONFIG_FILE, FALLBACK_CONFIG).firstOrNull { it.canRead() }
+                parse(source?.readLines().orEmpty())
             }
         } catch (e: Exception) {
             Logs.w("configuration unreadable, using defaults", e)
@@ -112,6 +121,10 @@ data class BridgeSettings(
             }
 
             val outputs = values["outputs"]?.toIntOrNull()?.coerceIn(0, MAX_OUTPUTS) ?: 1
+            val packages = (0 until MAX_OUTPUTS).mapNotNull { index ->
+                val value = values["output.$index.package"]?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+                index to value
+            }.toMap()
             val overrides = (0 until MAX_OUTPUTS).mapNotNull { index ->
                 val prefix = "output.$index."
                 val width = values["${prefix}width"]?.toIntOrNull()
@@ -133,6 +146,7 @@ data class BridgeSettings(
                 channel = LinkMode.parse(values["channel"]),
                 outputs = outputs,
                 overrides = overrides,
+                packages = packages,
             )
         }
 
