@@ -94,15 +94,27 @@ Measured, in this order, from a root process (`tools` probe, `nest_probe2.cpp`):
    "a display renders into a caller-supplied surface" path.
 
 So the display half of Route A works and the output half does not. `layerFilter` and the layer
-list are reachable; the picture is not. What is still worth trying before giving up on Route A:
+list are reachable; the picture is not.
 
-- the two `String`/`float` trailing arguments of `createVirtualDisplay` are unidentified; one of
-  them may be the output surface's owner, so a second probe should try passing a layer name and
-  a refresh rate instead of `""` and `0.0f`;
-- a display created *by* `DisplayManager` (the module's path, which does show content) differs
-  from ours only in who called `createVirtualDisplay`; capturing that token would tell us whether
-  the output path is keyed on the caller or on some vendor branch (`OplusSurfaceFlinger` logs
-  `setProjection` for both).
+What was tried before concluding that, all with the display's stack already correct (7) and a
+visible layer on it:
+
+| variant | result |
+| --- | --- |
+| surface set first, stack later | accepted, no frames |
+| stack first, surface later | accepted, no frames |
+| surface + stack in one transaction | accepted, no frames |
+| output layer's own `getIGraphicBufferProducer` | accepted, no frames |
+| that layer moved off the display's stack (no feedback loop) | accepted, no frames |
+| trailing `String` of `createVirtualDisplay` = an existing layer's name | accepted, no frames |
+
+The frame counter of the output layer never moves and SurfaceFlinger prints no error, which
+means it never even attempts the transfer. This build does not implement "a display renders
+into a caller-supplied surface" for either a `BufferQueue` or a `SurfaceControl` producer.
+
+That kills **Route B as well**: the module-hosts-the-display variant ends in the same
+`setDisplaySurface` call, so handing our producer over a binder channel would change nothing.
+
 
 
 ## Route B — the module hosts the display, the compositor provides the surface
@@ -124,13 +136,47 @@ binder object once.
 The cost is real: the compositor would carry `libbinder` plus a parcelable wrapper for the
 producer, and both sides would have to agree on the ABI of that wrapper.
 
+Measured, this route is dead for the same reason Route A is: it ends in the same
+`setDisplaySurface` call, which this build accepts and ignores.
+
+## Route C — capture the display instead of hosting its output
+
+SurfaceFlinger will not hand a display's picture to a surface of ours, but it will hand the
+picture to a **capture listener**. That is the path `screencap` and screen recording use, and
+the one piece of display plumbing that is both exported and vendor-maintained:
+
+```
+ScreenshotClient::captureDisplay(DisplayId, CaptureArgs, sp<IScreenCaptureListener>)
+BnScreenCaptureListener   -- exported, including its vtable
+```
+
+The compositor asks for one capture per frame of the hosted display, receives a
+`GraphicBuffer`, wraps it as an `EGLImage` (`eglGetNativeClientBufferANDROID` +
+`eglCreateImageKHR`) and composites it like any client buffer. No CPU readback, no
+`SurfaceView`, no display ownership — the tile becomes an ordinary texture in the scene graph,
+so z-order, scaling and clipping behave exactly like a Wayland window.
+
+Costs and open points:
+
+- one extra GPU composition pass per hosted display per frame, which is the price of reading
+  a framebuffer back through the GPU instead of sharing a buffer;
+- `captureDisplay` wants the 64-bit `DisplayId` from `dumpsys SurfaceFlinger --display-id`,
+  not the `DisplayManager` id: one `dumpsys` fork per display creation, cached afterwards;
+- the listener is a `BnScreenCaptureListener` whose single virtual is pure, so the compositor
+  has to install one function in a copied vtable — the same hand-written ABI style as
+  `sf_layer.hpp`, but it is the only way to receive frames without a second process.
+
+A side effect worth stating: this also replaces the `screencap` subprocess in
+`wlr-screencopy`, which today forks a process and reads pixels through a pipe.
+
 ## Ordering
 
-1. Route A first: it is a single binder call and answers the only open question (is a
-   root-owned virtual display accepted). If it is, the rest is display bookkeeping.
-2. Route B only if A is refused, because it is the expensive one.
-3. The overlay path stays as the fallback. A compositor without the nested output must still
+1. Route A: answered — display creation works, the output surface does not.
+2. Route B: dead for the same reason.
+3. Route C is what is left, and it is the only one that also fixes screenshots.
+4. The overlay path stays as the fallback. A compositor without the nested output must still
    show something, and every Android tile in this design is optional.
+
 
 ## The launcher
 
