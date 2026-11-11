@@ -23,7 +23,6 @@
 #include "wlr-screencopy-unstable-v1-server-protocol.h"
 
 static int32_t sc_w = 0, sc_h = 0;
-static const char *SC_TMP = "/data/local/tmp/.sfwm-sc.raw";
 
 typedef struct { int32_t w, h; } ScSize;
 
@@ -45,7 +44,14 @@ struct SfwmShmBufView {
 };
 #define SFWM_SHM_MAGIC 0x53464246u   /* 'SBFB' */
 
+// One RGBA pixel in memory order R,G,B,A -> XRGB8888, with A forced opaque.
+static uint32_t sc_bgra(uint32_t v) {
+    return (v & 0xFF00FF00u) | ((v & 0x000000FFu) << 16) | ((v >> 16) & 0xFFu) | 0xFF000000u;
+}
+
 // screencap output: u32 width, height, format, then pixels in memory order R,G,B,A.
+// It is read straight from the pipe into the client buffer: no temporary file in
+// /data/local/tmp, nothing to clean up, and two captures cannot collide on a path.
 static int sc_grab_into_shm(struct wl_resource *buffer) {
     if (!buffer) return 0;
     void *ud = wl_resource_get_user_data(buffer);
@@ -59,40 +65,40 @@ static int sc_grab_into_shm(struct wl_resource *buffer) {
     if (bw <= 0 || bh <= 0 || bstride <= 0) return 0;
     uint8_t *dst_base = sb->pool->base + sb->offset;
 
-    char cmd[256];
-    snprintf(cmd, sizeof cmd, "screencap > %s", SC_TMP);
-    if (system(cmd) != 0) { remove(SC_TMP); printf("[screencopy] screencap failed\n"); return 0; }
-    FILE *fp = fopen(SC_TMP, "rb");
-    if (!fp) return 0;
+    FILE *fp = popen("screencap", "r");
+    if (!fp) { printf("[screencopy] cannot start screencap\n"); return 0; }
+    // A pipe defaults to one page of stdio buffer, which turns a full frame into
+    // thousands of reads. A larger buffer keeps the child writing at full speed.
+    setvbuf(fp, NULL, _IOFBF, 1u << 20);
 
     uint32_t hdr[3] = {0, 0, 0};
     int ok = 0;
     uint8_t *row = NULL;
     if (fread(hdr, sizeof hdr, 1, fp) == 1 && hdr[0] > 0 && hdr[1] > 0) {
         const int32_t sw = (int32_t)hdr[0], sh = (int32_t)hdr[1];
-        const int32_t src_stride = sw * 4;
-        row = (uint8_t *)malloc((size_t)src_stride);
+        const size_t src_stride = (size_t)sw * 4u;
+        const int32_t rows = bh < sh ? bh : sh;
+        const int32_t cols_max = bw < sw ? bw : sw;
+        row = (uint8_t *)malloc(src_stride);
         if (row) {
-            const int32_t rows = bh < sh ? bh : sh;
-            const int32_t cols_max = bw < sw ? bw : sw;
+            ok = 1;
             for (int32_t y = 0; y < rows; y++) {
-                if (fseek(fp, 12L + (long)((size_t)y * (size_t)src_stride), SEEK_SET) != 0) break;
-                if (fread(row, 1, (size_t)src_stride, fp) != (size_t)src_stride) break;
+                if (fread(row, 1, src_stride, fp) != src_stride) { ok = 0; break; }
                 uint8_t *dst = dst_base + (size_t)y * (size_t)bstride;
                 for (int32_t x = 0; x < cols_max; x++) {
-                    const uint8_t *p = row + (size_t)x * 4;
-                    dst[x * 4 + 0] = p[2];   // B
-                    dst[x * 4 + 1] = p[1];   // G
-                    dst[x * 4 + 2] = p[0];   // R
-                    dst[x * 4 + 3] = 0xFF;
+                    uint32_t px;
+                    memcpy(&px, row + (size_t)x * 4u, sizeof px);
+                    px = sc_bgra(px);
+                    memcpy(dst + (size_t)x * 4u, &px, sizeof px);
                 }
             }
-            ok = 1;
         }
     }
     if (row) free(row);
-    fclose(fp);
-    remove(SC_TMP);
+    // A client buffer smaller than the screen leaves part of the stream unread, so
+    // screencap exits on SIGPIPE; only a short read of the rows we wanted matters.
+    const int status = pclose(fp);
+    if (!ok && status != 0) printf("[screencopy] screencap failed (status %d)\n", status);
     return ok;
 }
 
