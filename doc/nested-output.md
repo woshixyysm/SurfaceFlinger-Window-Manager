@@ -34,15 +34,13 @@ A virtual display does not need `DisplayManager` at all. SurfaceFlinger has its 
 API — the one the shell uses for `--new-display` style features:
 
 ```
-SurfaceComposerClient::createDisplay(name, secure)   -> display token + layer
+SurfaceComposerClient::createVirtualDisplay(name, secure, policy, extra, refresh)
+                                                     -> display token
+Transaction::setDisplayLayerStack(token, stack)      -> which layers the display shows
 Transaction::setDisplaySurface(token, surface)       -> where the display renders
-Transaction::setDisplayProjection / setDisplayLayerStack
+Transaction::setDisplayProjection(token, rot, viewport, frame)
+SurfaceComposerClient::destroyVirtualDisplay(token)
 ```
-
-The compositor already owns `SurfaceComposerClient` and a `SurfaceControl`, so both ends of
-that call are in one process: the display renders into a layer the compositor owns, which is
-exactly the nesting this document is about, with no surface crossing a process boundary and
-no parcelable ABI to agree on.
 
 Permission is not the obstacle it looks like. AOSP has no `CREATE_VIRTUAL_DISPLAY`
 permission; what is checked are the *flags* of a `DisplayManager` display (mirroring, secure,
@@ -62,6 +60,50 @@ Costs, in exchange for a real layer:
   external monitor (no system decorations unless asked for);
 - release order matters: the display must go before its layer, or the surface stays owned by
   a dead display.
+
+### What the device actually does (measured, Android 16 / PLQ110 / BP2A.250605.015)
+
+The AIDL method is called `createVirtualDisplay`, not `createDisplay` — the latter no longer
+exists in `ISurfaceComposer`, which has 81 transactions on this build:
+
+| code | method | wire arguments |
+| --- | --- | --- |
+| 4 | `createVirtualDisplay` | `String name, boolean secure, byte OptimizationPolicy, String extra, float extra` → `IBinder` |
+| 5 | `destroyVirtualDisplay` | `IBinder` |
+| 13 | `getDynamicDisplayInfoFromId` | `long` |
+| 14 | `getDynamicDisplayInfoFromToken` | `IBinder` |
+
+`SurfaceComposerClient::createVirtualDisplay` is exported from `libgui.so`, so no transaction
+is hand-written: the compositor calls it the same way it already calls
+`createSurfaceChecked`. `service call SurfaceFlinger …` is useless for probing — SurfaceFlinger
+answers every code with `Operation not permitted` because the shell command does not write the
+AIDL interface token.
+
+Measured, in this order, from a root process (`tools` probe, `nest_probe2.cpp`):
+
+1. `createVirtualDisplay("sfwm-nest1", false, false, "", 0.0f)` succeeds: the log shows
+   `Creating virtual display`, `processDisplayAdded`, `powerMode=On`.
+2. The new display starts with `layerFilter={layerStack=4294967295}` — **no layer stack**. The
+   caller has to supply one: `setDisplayLayerStack(token, 7)` (0 is the internal display, 5 and 6
+   are the two hosted displays, so the next free value works).
+3. A top-level `SurfaceControl` whose `setLayerStack` matches appears in that display's layer
+   list and is composited with `Comp Type: CLIENT` and `usesClientComposition=true`.
+4. `setDisplaySurface(token, producer)` — with both a plain `BufferQueue` producer and a
+   `SurfaceControl`'s own producer — returns success and **nothing is ever queued**: the display
+   composes into its client target and the frame is dropped. This build no longer implements the
+   "a display renders into a caller-supplied surface" path.
+
+So the display half of Route A works and the output half does not. `layerFilter` and the layer
+list are reachable; the picture is not. What is still worth trying before giving up on Route A:
+
+- the two `String`/`float` trailing arguments of `createVirtualDisplay` are unidentified; one of
+  them may be the output surface's owner, so a second probe should try passing a layer name and
+  a refresh rate instead of `""` and `0.0f`;
+- a display created *by* `DisplayManager` (the module's path, which does show content) differs
+  from ours only in who called `createVirtualDisplay`; capturing that token would tell us whether
+  the output path is keyed on the caller or on some vendor branch (`OplusSurfaceFlinger` logs
+  `setProjection` for both).
+
 
 ## Route B — the module hosts the display, the compositor provides the surface
 
