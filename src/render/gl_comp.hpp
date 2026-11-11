@@ -394,7 +394,7 @@ static bool init() {
         A.BindVertexArray(g_vao);
     }
 
-    printf(" %s|[gl] GPU composition ready: %s | %s| %s\n",
+    printf("[gl] GPU composition ready: %s | %s\n",
            (const char *)A.GetString(GL_VERSION_),
            (const char *)A.GetString(GL_RENDERER_));
     return g_ok = true;
