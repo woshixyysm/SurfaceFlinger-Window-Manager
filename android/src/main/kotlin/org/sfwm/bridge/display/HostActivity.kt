@@ -1,16 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// A hosted output is an application task, not an overlay window.
+// The window of one hosted output.
 //
-// The shell's own floating windows — the task switcher, the small window — are application
-// band windows, and an overlay window is always sorted above that band. Making each output a
-// freeform task instead means ordering against those windows follows focus, exactly as it
-// does between two ordinary applications, and nothing has to be hidden or moved aside.
+// A task, not an overlay window. The shell's own floating windows — the task switcher, the
+// small window — are application band windows, and an overlay window is always sorted above
+// that band. As a freeform task the host is ordered against them by focus, the way two
+// ordinary applications are, and nothing has to be hidden or moved aside.
+//
+// The window runs in this application's process while the module runs in the shell's, so the
+// two talk over binder: `HostLink` is the protocol.
 package org.sfwm.bridge.display
 
 import android.app.Activity
-import android.content.Intent
-import android.graphics.Rect
+
+import android.os.Binder
 import android.os.Bundle
+import android.os.IBinder
+import android.os.Parcel
 import android.view.MotionEvent
 import android.view.Surface
 import android.view.SurfaceHolder
@@ -19,31 +24,6 @@ import android.view.WindowManager
 import org.sfwm.bridge.Logs
 import org.sfwm.bridge.OutputPlacement
 
-/** The running host activities, keyed by slot; the stage talks to them through this. */
-object HostBridge {
-    interface Listener {
-        fun onSurface(slot: Int, surface: Surface)
-        fun onSurfaceGone(slot: Int)
-        fun onTouch(slot: Int, event: MotionEvent)
-    }
-
-    var listener: Listener? = null
-
-    private val live = HashMap<Int, HostActivity>()
-
-    fun register(slot: Int, activity: HostActivity) {
-        live[slot] = activity
-    }
-
-    fun unregister(slot: Int, activity: HostActivity) {
-        if (live[slot] === activity) live.remove(slot)
-    }
-
-    fun activityOf(slot: Int): HostActivity? = live[slot]
-
-    fun activities(): List<HostActivity> = live.values.toList()
-}
-
 /**
  * The window of one hosted output. Its only content is the `SurfaceView` the virtual display
  * renders into, and its task bounds are the tile rectangle the compositor asked for.
@@ -51,12 +31,40 @@ object HostBridge {
 class HostActivity : Activity(), SurfaceHolder.Callback {
     private var slot = -1
     private var view: SurfaceView? = null
+    private var caller: IBinder? = null
+
+    /** What the module drives this window with; handed over on the first transaction. */
+    private val endpoint = object : Binder() {
+        override fun onTransact(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean {
+            when (code) {
+                HostLink.CODE_PLACE -> {
+                    val x = data.readInt()
+                    val y = data.readInt()
+                    val width = data.readInt()
+                    val height = data.readInt()
+                    runOnUiThread { place(OutputPlacement(width, height, density(), x, y)) }
+                    return true
+                }
+                HostLink.CODE_SHOWN -> {
+                    val shown = data.readInt() != 0
+                    runOnUiThread { setShown(shown) }
+                    return true
+                }
+                HostLink.CODE_FINISH -> {
+                    runOnUiThread { finishAndRemoveTask() }
+                    return true
+                }
+            }
+            return super.onTransact(code, data, reply, flags)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        slot = intent.getIntExtra(EXTRA_SLOT, -1)
-        if (slot < 0) {
-            Logs.w("host activity started without a slot")
+        slot = intent.getIntExtra(HostLink.EXTRA_SLOT, -1)
+        caller = intent.extras?.getBinder(HostLink.EXTRA_CALLBACK)
+        if (slot < 0 || caller == null) {
+            Logs.w("host window started without a slot or without its module")
             finish()
             return
         }
@@ -67,33 +75,30 @@ class HostActivity : Activity(), SurfaceHolder.Callback {
         surfaceView.holder.addCallback(this)
         view = surfaceView
         setContentView(surfaceView)
-        HostBridge.register(slot, this)
+        send(HostLink.CODE_HELLO) {
+            it.writeStrongBinder(endpoint)
+            it.writeInt(taskId)
+        }
         Logs.i("output $slot is a task now")
     }
 
     override fun onDestroy() {
-        HostBridge.unregister(slot, this)
+        caller = null
         Logs.i("output $slot task finished")
         super.onDestroy()
     }
 
-    fun surfaceOrNull(): Surface? = view?.holder?.surface?.takeIf { it.isValid }
-
-    /** Moves and resizes the tile: the task bounds are the rectangle, the window follows. */
-    fun place(placement: OutputPlacement) {
-        val bounds = Rect(
-            placement.x,
-            placement.y,
-            placement.x + placement.width,
-            placement.y + placement.height,
-        )
+    /**
+     * The window only sizes its own content. Where the task sits is the module's business: a
+     * task can only be moved by a caller that may manage tasks.
+     */
+    private fun place(placement: OutputPlacement) {
         runCatching { window.setLayout(placement.width, placement.height) }
-        resize(bounds)
-        Logs.i("output $slot task at ${bounds.left},${bounds.top} ${bounds.width()}x${bounds.height()}")
+        Logs.i("output $slot window ${placement.width}x${placement.height} at ${placement.x},${placement.y}")
     }
 
     /** Keeps the surface alive: an invisible view would destroy it and restart the display. */
-    fun setShown(shown: Boolean) {
+    private fun setShown(shown: Boolean) {
         val attributes = window.attributes
         attributes.alpha = if (shown) 1f else 0f
         runCatching { window.attributes = attributes }
@@ -103,45 +108,45 @@ class HostActivity : Activity(), SurfaceHolder.Callback {
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
         // The window only sees contacts that reached it: whatever the shell has above it
         // consumed them first. Those are the ones the hosted display should get.
-        HostBridge.listener?.onTouch(slot, event)
+        val action = event.actionMasked
+        val x = event.x
+        val y = event.y
+        send(HostLink.CODE_TOUCH) {
+            it.writeInt(action)
+            it.writeFloat(x)
+            it.writeFloat(y)
+        }
         return true
     }
 
-    override fun surfaceCreated(holder: SurfaceHolder) {
-        Logs.i("surface ready for output $slot")
-        HostBridge.listener?.onSurface(slot, holder.surface)
-    }
+    override fun surfaceCreated(holder: SurfaceHolder) = publish(holder.surface)
 
-    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-        HostBridge.listener?.onSurface(slot, holder.surface)
-    }
+    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) =
+        publish(holder.surface)
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         Logs.i("surface lost for output $slot")
-        HostBridge.listener?.onSurfaceGone(slot)
+        send(HostLink.CODE_SURFACE_GONE) { }
     }
 
-    private fun resize(bounds: Rect) {
-        val atm = runCatching {
-            Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null)
-        }.getOrNull() ?: return
-        val attempts = listOf(
-            arrayOf(Int::class.javaPrimitiveType, Rect::class.java, Int::class.javaPrimitiveType) to
-                arrayOf<Any>(taskId, bounds, 0),
-            arrayOf(Rect::class.java, Int::class.javaPrimitiveType, Int::class.javaPrimitiveType) to
-                arrayOf<Any>(bounds, 0, taskId),
-        )
-        for ((types, values) in attempts) {
-            val done = runCatching {
-                atm.javaClass.getMethod("resizeTask", *types).invoke(atm, *values)
-                true
-            }.getOrDefault(false)
-            if (done) return
+    private fun publish(surface: Surface) {
+        if (!runCatching { surface.isValid }.getOrDefault(false)) return
+        Logs.i("surface ready for output $slot")
+        send(HostLink.CODE_SURFACE) { it.writeParcelable(surface, 0) }
+    }
+
+    private fun send(code: Int, body: (Parcel) -> Unit) {
+        val binder = caller ?: return
+        val data = Parcel.obtain()
+        try {
+            body(data)
+            binder.transact(code, data, null, IBinder.FLAG_ONEWAY)
+        } catch (e: Exception) {
+            Logs.w("output $slot could not reach the module", e)
+        } finally {
+            data.recycle()
         }
-        Logs.w("could not resize task $taskId")
     }
 
-    companion object {
-        const val EXTRA_SLOT = "org.sfwm.bridge.SLOT"
-    }
+    private fun density(): Int = resources.displayMetrics.densityDpi
 }

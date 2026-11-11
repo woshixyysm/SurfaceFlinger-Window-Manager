@@ -11,11 +11,13 @@ import android.app.ActivityOptions
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.graphics.Rect
 import android.content.IntentFilter
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.view.Display
+import android.view.MotionEvent
 import android.view.Surface
 import org.sfwm.bridge.BridgeLink
 import org.sfwm.bridge.BridgeReport
@@ -38,7 +40,7 @@ class VirtualOutputs(
     private val panels = PanelReader(context)
     private val displays = OutputSurfaceFactory(context)
     private val injector = TouchInjector()
-    private val stage = OutputStage(context, ::attach, ::detach, ::forwardTouch)
+    private val stage = OutputStage(context, ::attach, ::detach, ::forwardTouch, ::resizeHostTask)
     private val slots = settings.outputs.coerceIn(0, MAX_SLOTS)
     private val requests = LinkedHashMap<Int, SlotRequest>()
     // What has already been started on which display, so a resize does not relaunch an app.
@@ -151,17 +153,17 @@ class VirtualOutputs(
      * Touch that reached a hosted window. The coordinates are the window's own, which are the
      * display's: the window is exactly as large as the display it hosts.
      */
-    private fun forwardTouch(slot: Int, event: android.view.MotionEvent) {
-        val phase = when (event.actionMasked) {
-            android.view.MotionEvent.ACTION_DOWN -> "down"
-            android.view.MotionEvent.ACTION_MOVE -> "move"
-            android.view.MotionEvent.ACTION_UP -> "up"
-            android.view.MotionEvent.ACTION_CANCEL -> "cancel"
+    private fun forwardTouch(slot: Int, action: Int, x: Float, y: Float) {
+        val phase = when (action) {
+            MotionEvent.ACTION_DOWN -> "down"
+            MotionEvent.ACTION_MOVE -> "move"
+            MotionEvent.ACTION_UP -> "up"
+            MotionEvent.ACTION_CANCEL -> "cancel"
             else -> return
         }
         val displayId = displays.displayIdOf(slot) ?: return
         lastSlot = slot
-        injector.send(displayId, phase, event.x, event.y, event.getPointerId(0))
+        injector.send(displayId, phase, x, y, 0)
     }
 
     /** Delivers one touch event to the display behind [slot], in that display's pixels. */
@@ -274,6 +276,38 @@ class VirtualOutputs(
                 .getMethod("moveRootTaskToDisplay", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
                 .invoke(atm, taskId, displayId) as? Boolean ?: false
         }.onFailure { Logs.w("moveRootTaskToDisplay($taskId, $displayId) failed", it) }.getOrDefault(false)
+    }
+
+    /**
+     * Places a host window's task. The window cannot do this itself: `resizeTask` only moves a
+     * task for a caller that may manage tasks, and only the forced modes actually apply, which
+     * is why the ladder starts at the user-forced one.
+     */
+    private fun resizeHostTask(taskId: Int, placement: OutputPlacement): Boolean {
+        val atm = atmService() ?: return false
+        val method = runCatching {
+            atm.javaClass.getMethod(
+                "resizeTask",
+                Int::class.javaPrimitiveType,
+                Rect::class.java,
+                Int::class.javaPrimitiveType,
+            )
+        }.getOrNull() ?: return false
+        val bounds = Rect(
+            placement.x,
+            placement.y,
+            placement.x + placement.width,
+            placement.y + placement.height,
+        )
+        for (mode in RESIZE_MODES) {
+            val done = runCatching {
+                method.invoke(atm, taskId, bounds, mode)
+                true
+            }.getOrDefault(false)
+            if (done) return true
+        }
+        Logs.w("task $taskId refused the placement ${bounds.flattenToString()}")
+        return false
     }
 
     private fun placementOf(slot: Int): OutputPlacement = settings.placement(slot, panel)
@@ -486,6 +520,9 @@ class VirtualOutputs(
 
         /** A `dumpsys` per sweep is cheap enough at this rate and needs no hidden API. */
         const val SWEEP_INTERVAL_MS = 3000L
+
+        /** `ActivityTaskManager.RESIZE_MODE_USER_FORCED`, then the weaker ones. */
+        val RESIZE_MODES = intArrayOf(5, 4, 3, 1)
 
         /** `Display #5 (activities from top to bottom):` */
         val DISPLAY_HEADER = Regex("^Display #(\\d+) ")

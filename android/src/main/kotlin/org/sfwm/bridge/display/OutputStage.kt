@@ -6,8 +6,9 @@
 // that band, so an overlay host would always cover them. As a task the host is ordered with
 // them by focus, which is what "living in Android" means for a hosted display.
 //
-// The task is started before the virtual display exists, so the surface callback always has
-// somewhere to attach; the display then follows the surface, not the other way round.
+// The task runs in this application's process, this code in the shell's, so the two meet on
+// binder: the start intent carries an endpoint, the window answers with its own, and the rest
+// is `HostLink`.
 package org.sfwm.bridge.display
 
 import android.app.ActivityOptions
@@ -15,7 +16,12 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.graphics.Rect
-import android.view.MotionEvent
+import android.os.Binder
+import android.os.Bundle
+import android.os.Handler
+import android.os.IBinder
+import android.os.Looper
+import android.os.Parcel
 import android.view.Surface
 import org.sfwm.bridge.Logs
 import org.sfwm.bridge.OutputPlacement
@@ -24,22 +30,60 @@ class OutputStage(
     private val context: Context,
     private val surfaceSink: (slot: Int, surface: Surface) -> Unit,
     private val surfaceGoneSink: (slot: Int) -> Unit,
-    private val touchSink: (slot: Int, event: MotionEvent) -> Unit,
-) : HostBridge.Listener {
+    private val touchSink: (slot: Int, action: Int, x: Float, y: Float) -> Unit,
+    private val resizeSink: (taskId: Int, placement: OutputPlacement) -> Boolean,
+) {
     private val placements = HashMap<Int, OutputPlacement>()
+    private val endpoints = HashMap<Int, Endpoint>()
+    private val surfaces = HashMap<Int, Surface>()
     private var shown = true
 
-    init {
-        HostBridge.listener = this
+    /** The module's half of the link: the window answers here. */
+    private inner class Endpoint(val slot: Int) : Binder() {
+        var peer: IBinder? = null
+        var taskId = -1
+
+        override fun onTransact(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean {
+            when (code) {
+                HostLink.CODE_HELLO -> {
+                    peer = data.readStrongBinder()
+                    taskId = data.readInt()
+                    Logs.i("output $slot task $taskId is connected")
+                    placements[slot]?.let { applyPlace(slot, it) }
+                    if (!shown) sendShown(slot, false)
+                    return true
+                }
+                HostLink.CODE_SURFACE -> {
+                    val surface = data.readParcelable<Surface>(Surface::class.java.classLoader)
+                    if (surface != null) onMain { surfaces[slot] = surface; surfaceSink(slot, surface) }
+                    return true
+                }                HostLink.CODE_SURFACE_GONE -> {
+                    onMain {
+                        surfaces.remove(slot)
+                        surfaceGoneSink(slot)
+                    }
+                    return true
+                }
+                HostLink.CODE_TOUCH -> {
+                    val action = data.readInt()
+                    val x = data.readFloat()
+                    val y = data.readFloat()
+                    onMain { touchSink(slot, action, x, y) }
+                    return true
+                }
+            }
+            return super.onTransact(code, data, reply, flags)
+        }
     }
 
-    fun isMounted(slot: Int): Boolean = HostBridge.activityOf(slot) != null
+    fun isMounted(slot: Int): Boolean = endpoints[slot]?.peer != null
 
-    fun surfaceOf(slot: Int): Surface? = HostBridge.activityOf(slot)?.surfaceOrNull()
+    /** The last surface the window reported; a window that moved still renders into it. */
+    fun surfaceOf(slot: Int): Surface? = surfaces[slot]
 
     fun mount(slot: Int, placement: OutputPlacement): Boolean {
         placements[slot] = placement
-        if (HostBridge.activityOf(slot) != null) {
+        if (endpoints[slot] != null) {
             reshape(slot, placement)
             return true
         }
@@ -48,19 +92,15 @@ class OutputStage(
 
     fun reshape(slot: Int, placement: OutputPlacement) {
         placements[slot] = placement
-        val activity = HostBridge.activityOf(slot) ?: return
-        activity.runOnUiThread {
-            if (activity.isFinishing) return@runOnUiThread
-            runCatching { activity.place(placement) }
-                .onFailure { Logs.w("output $slot could not be reshaped", it) }
-        }
+        applyPlace(slot, placement)
     }
 
     fun unmount(slot: Int) {
         placements.remove(slot)
-        val activity = HostBridge.activityOf(slot) ?: return
-        activity.runOnUiThread {
-            runCatching { activity.finishAndRemoveTask() }
+        surfaces.remove(slot)
+        val endpoint = endpoints.remove(slot) ?: return
+        endpoint.peer?.let { peer ->
+            runCatching { peer.transact(HostLink.CODE_FINISH, Parcel.obtain(), null, IBinder.FLAG_ONEWAY) }
                 .onFailure { Logs.w("output $slot task could not be finished", it) }
         }
         Logs.i("output $slot task finishing")
@@ -74,9 +114,7 @@ class OutputStage(
     fun setVisible(visible: Boolean) {
         if (visible == shown) return
         shown = visible
-        for (activity in HostBridge.activities()) {
-            activity.runOnUiThread { runCatching { activity.setShown(visible) } }
-        }
+        for (slot in endpoints.keys) sendShown(slot, visible)
         Logs.i("output tasks ${if (visible) "shown" else "faded out"}")
     }
 
@@ -84,13 +122,46 @@ class OutputStage(
         placements.keys.toList().forEach(::unmount)
     }
 
-    override fun onSurface(slot: Int, surface: Surface) = surfaceSink(slot, surface)
+    /** Moves a window: the task bounds are the placement, and the window is told as well. */
+    private fun applyPlace(slot: Int, placement: OutputPlacement) {
+        val endpoint = endpoints[slot] ?: return
+        if (endpoint.taskId > 0) resizeSink(endpoint.taskId, placement)
+        val peer = endpoint.peer ?: return
+        transact(peer, HostLink.CODE_PLACE) {
+            it.writeInt(placement.x)
+            it.writeInt(placement.y)
+            it.writeInt(placement.width)
+            it.writeInt(placement.height)
+        }
+    }
 
-    override fun onSurfaceGone(slot: Int) = surfaceGoneSink(slot)
+    private fun sendShown(slot: Int, visible: Boolean) {
+        val peer = endpoints[slot]?.peer ?: return
+        transact(peer, HostLink.CODE_SHOWN) { it.writeInt(if (visible) 1 else 0) }
+    }
 
-    override fun onTouch(slot: Int, event: MotionEvent) = touchSink(slot, event)
+    private fun transact(peer: IBinder, code: Int, body: (Parcel) -> Unit) {
+        val data = Parcel.obtain()
+        try {
+            body(data)
+            peer.transact(code, data, null, IBinder.FLAG_ONEWAY)
+        } catch (e: Exception) {
+            Logs.w("host window could not be reached", e)
+        } finally {
+            data.recycle()
+        }
+    }
+
+    private fun onMain(block: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) block()
+        else Handler(Looper.getMainLooper()).post {
+            runCatching(block).onFailure { Logs.w("a host window callback failed", it) }
+        }
+    }
 
     private fun start(slot: Int, placement: OutputPlacement): Boolean = runCatching {
+        val endpoint = Endpoint(slot)
+        endpoints[slot] = endpoint
         // The module runs inside the shell's process, so a class-relative intent would resolve
         // to the shell's package: the component has to name ours.
         val intent = Intent()
@@ -100,39 +171,24 @@ class OutputStage(
                     Intent.FLAG_ACTIVITY_MULTIPLE_TASK or
                     Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS,
             )
-            .putExtra(HostActivity.EXTRA_SLOT, slot)
+            .putExtra(HostLink.EXTRA_SLOT, slot)
+        // `Bundle.putBinder` is the only way in: `Intent` has no binder overload, and the
+        // window needs a binder, not a serialised copy of one.
+        intent.putExtras(Bundle().apply { putBinder(HostLink.EXTRA_CALLBACK, endpoint) })
         val options = ActivityOptions.makeBasic()
         launchWindowingMode(options, WINDOWING_MODE_FREEFORM)
         launchBounds(options, placement)
-        allowBackgroundStart(options)
         context.startActivity(intent, options.toBundle())
         Logs.i("output $slot started as a freeform task at ${placement.x},${placement.y}")
         true
     }.getOrElse { throwable ->
+        endpoints.remove(slot)
         Logs.w("output $slot task could not be started", throwable)
         false
     }
 
-    /**
-     * The shell starts these tasks from its own process while nothing of ours is in front, so
-     * the launch has to be marked as an allowed background start.
-     */
-    private fun allowBackgroundStart(options: ActivityOptions) {
-        runCatching {
-            ActivityOptions::class.java
-                .getMethod("setAllowBackgroundActivityStarts", Boolean::class.javaPrimitiveType)
-                .invoke(options, true)
-        }.onFailure { Logs.w("setAllowBackgroundActivityStarts unavailable", it) }
-        runCatching {
-            val mode = Class.forName("android.app.ActivityOptions")
-                .getField("MODE_BACKGROUND_ACTIVITY_START_ALLOWED").getInt(null)
-            ActivityOptions::class.java
-                .getMethod("setPendingIntentBackgroundActivityStartMode", Int::class.javaPrimitiveType)
-                .invoke(options, mode)
-        }.onFailure { /* older platforms have no such mode */ }
-    }
-
-    private fun launchWindowingMode(options: ActivityOptions, mode: Int) = runCatching {        ActivityOptions::class.java
+    private fun launchWindowingMode(options: ActivityOptions, mode: Int) = runCatching {
+        ActivityOptions::class.java
             .getMethod("setLaunchWindowingMode", Int::class.javaPrimitiveType)
             .invoke(options, mode)
     }.onFailure { Logs.w("setLaunchWindowingMode unavailable", it) }

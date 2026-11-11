@@ -169,15 +169,30 @@ The shell's own floating windows — the task switcher a swipe-up opens, and the
 (`com.oplus.pscanvas` / `OplusFlexibleWindowUI`, launched from `com.coloros.smartsidebar`) —
 are ordinary application-band content: the small window is a `ContainerActivity` that hosts
 embedded task surfaces through `FlexibleWindowManager`, and the sidebar launches everything
-with `setLaunchDisplayId(0)`. The host windows here are `TYPE_APPLICATION_OVERLAY` (2038),
-which the window manager sorts above that band, so those windows are drawn underneath and are
-never seen. Hiding the hosts while they are up works but is not compatibility, only a truce.
+with `setLaunchDisplayId(0)`. An overlay host (`TYPE_APPLICATION_OVERLAY`, 2038) is sorted
+above that band by the window manager, so while the hosts were overlays those windows were
+drawn underneath and never seen.
 
-The compatible answer is to put the hosts in the same band: one activity per host window,
-launched as a freeform task with `setLaunchWindowingMode(FREEFORM)` + `setLaunchBounds`, so
-that ordering against the shell's own windows follows focus the way it does for any other
-application. That is the same shape the vendor uses for its small window, and it removes the
-"who is above whom" question instead of answering it per feature.
+Each host is therefore a freeform task of its own: `setLaunchWindowingMode(FREEFORM)` +
+`setLaunchBounds` on the start intent, activity in this package. Ordering against the shell's
+own windows then follows focus, the way it does between two ordinary applications, and the
+task switcher and the small window appear above the hosts without anything being hidden.
+This is the same shape the vendor uses for its small window.
+
+Two Android rules shape the implementation:
+
+- The module runs inside the shell's process, so the start does not come from this package's
+  uid. The activity is `exported="true"` and guarded by `android.permission.STATUS_BAR_SERVICE`,
+  which only the shell holds.
+- The window lives in this application's process, the module in the shell's, so the two meet
+  on binder (`HostLink`): the start intent carries `Bundle.putBinder`, the window answers
+  with its own binder plus its task id, and surfaces (`Surface` is `Parcelable`), placements
+  and touches travel from there. Nothing is shared but `Parcel`s.
+
+Where a task sits is the module's business, not the window's: `ActivityTaskManager.resizeTask`
+only moves a task for a caller that may manage tasks, and only the forced resize modes apply
+(`RESIZE_MODE_USER_FORCED`, 5). The window only sizes its own content.
+
 
 ## Input observation
 
@@ -206,11 +221,12 @@ than one per inset computation.
 
 An output is three objects, created in this order:
 
-1. `OutputStage` adds one overlay window per slot, with a `SurfaceView` inside it. It is
-   translucent, hardware accelerated, not focusable and not touch modal: sfwm reads
-   `/dev/input` itself and routes events, so the window only has to stay out of the way.
-2. The surface callback hands the surface to `OutputSurfaceFactory`, which creates the
-   virtual display through `DisplayManager` and remembers the size it was created with.
+1. `OutputStage` starts one freeform task per slot, whose `HostActivity` holds a
+   `SurfaceView`. It has no window of its own to configure: the task bounds are the tile, and
+   the module moves them with `resizeTask`.
+2. The window reports its surface over binder; the module hands it to `OutputSurfaceFactory`,
+   which creates the virtual display through `DisplayManager` and remembers the size it was
+   created with.
 3. `VirtualOutputs` reads the display id and layer stack, records them in `BridgeReport`,
    and publishes.
 
@@ -218,6 +234,10 @@ The mount table is what keeps outputs stable. A placement that only moves the wi
 not resize or recreate the display, so the layer stack — and every window sfwm has put on
 it — survives. A size change calls `resize`, which keeps the display id; recreation happens
 only when the platform refuses the resize.
+
+`HostActivity` never hides itself: an invisible `SurfaceView` destroys its surface, which
+would tear down the hosted display and restart its applications. The lock screen fades the
+task out with window alpha instead, and unmounting finishes the task.
 
 Creation tries the trusted flag first (`VIRTUAL_DISPLAY_FLAG_TRUSTED`, value 256, hidden
 from the SDK), then the public combinations, because a trusted public own-content display is
