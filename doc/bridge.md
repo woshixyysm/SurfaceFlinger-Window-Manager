@@ -119,12 +119,13 @@ touch <slot> <phase> <x> <y>   forward one contact, in the display's own pixels
 status                         republish the snapshot
 ```
 
-Touch is forwarded, not relayed: the compositor reads `/dev/input` itself and knows which
-tile a finger landed in, while the window sits above its layers on the default display, so
-the app would otherwise never see the event. `phase` is `down`, `move`, `up` or `cancel`;
-the coordinates are relative to the tile. They are delivered with
+Touch is forwarded, not relayed, and the window decides. A contact inside a hosted window is
+the window's, so whatever the shell put above it — the shade, the control centre, the input
+method, a floating small window — takes the contact first and the application never sees it.
+The module forwards from a touch listener on the window, in the display's own pixels, with
 `InputManager.injectInputEvent` after `MotionEvent.setDisplayId` (hidden, called
-reflectively), which is what points the event at the hosted display.
+reflectively). The `touch` command still exists for tooling, but the interactive path does
+not use it: the compositor cannot know what is drawn above a hosted window.
 
 Layer order is fixed by construction. A hosted window is an overlay of the default display,
 so the shade, the control centre, the input method and floating small windows — all system

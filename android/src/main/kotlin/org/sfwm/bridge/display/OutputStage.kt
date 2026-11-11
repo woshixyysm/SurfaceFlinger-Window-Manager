@@ -23,6 +23,7 @@ class OutputStage(
     private val context: Context,
     private val onSurface: (slot: Int, surface: Surface) -> Unit,
     private val onSurfaceGone: (slot: Int) -> Unit,
+    private val onTouch: (slot: Int, event: android.view.MotionEvent) -> Unit,
 ) {
     private class Frame(
         val root: FrameLayout,
@@ -71,6 +72,13 @@ class OutputStage(
         })
         root.setBackgroundColor(Color.TRANSPARENT)
         root.addView(view, FrameLayout.LayoutParams(placement.width, placement.height))
+        // The window is the arbiter for its own touches: whatever the shell has above it (the
+        // shade, the control centre, a floating window) takes the contact first, and only
+        // what reaches this window is delivered to the hosted display.
+        root.setOnTouchListener { _, event ->
+            onTouch(slot, event)
+            true
+        }
 
         val params = windowParams(slot, placement)
         return runCatching {
@@ -164,6 +172,10 @@ class OutputStage(
          * Not focusable and not touch modal: input belongs to sfwm, and the window must never
          * steal a tap from the shell underneath.
          */
+        // Flagged as an ordinary touch window with FLAG_NOT_TOUCH_MODAL: a contact inside it
+        // belongs to it, a contact outside goes to whatever is behind, and anything the shell
+        // puts above (the shade, the control centre, a floating window) wins the contact
+        // before it ever arrives here.
         const val FLAGS = WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
             WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or

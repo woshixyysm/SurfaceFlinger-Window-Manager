@@ -15,10 +15,9 @@
 //   OWNER_RESIZE resize started in a corner band, with the opposite corner fixed
 //   OWNER_TILE   three-finger window-management gesture
 //   OWNER_TILE_RATIO  two fingers dragging the split of a managed window
-//   OWNER_APP    the touch belongs to a hosted Android window
 //   OWNER_NONE   idle
 enum TouchOwner { OWNER_NONE = 0, OWNER_CLIENT, OWNER_MOVE, OWNER_RESIZE, OWNER_PINCH, OWNER_TILE,
-                  OWNER_TILE_RATIO, OWNER_APP };
+                  OWNER_TILE_RATIO };
 
 static TouchOwner g_owner = OWNER_NONE;
 static int touch_owner_value(void) { return (int)g_owner; }
@@ -45,9 +44,6 @@ static float   g_pinch_zoom0 = 1.f;   // zoom at gesture start, so successive pi
 // Three-finger window-management gesture: where it started and where the fingers are now.
 static int32_t g_tile_swipe_x = 0, g_tile_swipe_y = 0;
 static int32_t g_tile_last_x = 0, g_tile_last_y = 0;
-// The hosted Android window that owns the current touch, and where it last was.
-static AppWin *g_app_touch = nullptr;
-static int32_t g_app_last_x = 0, g_app_last_y = 0;
 
 static void idle_note_activity();   // ext-idle-notify, defined in idle_notify.hpp
 
@@ -216,10 +212,6 @@ static void handle_frame() {
             tile_swipe_end(g_tile_swipe_x, g_tile_swipe_y, g_tile_last_x, g_tile_last_y);
         } else if (g_owner == OWNER_TILE_RATIO) {
             printf("[tile] boundary drag finished\n");
-        } else if (g_owner == OWNER_APP) {
-            appwin_touch(g_app_touch, "up", g_app_last_x, g_app_last_y);
-            printf("[app] touch up in slot %d\n", g_app_touch ? g_app_touch->slot : -1);
-            g_app_touch = nullptr;
         }
         // The client is only updated when the gesture ends; during it nothing is touched.
         // Hide the cursor on release so it cannot cover the next click.
@@ -331,20 +323,6 @@ static void handle_frame() {
 
     g_in.screen_x = fx;
     g_in.screen_y = fy;
-
-    // ---------- owner APP: forward into the hosted display ----------
-    if (g_owner == OWNER_APP) {
-        g_in.pending = 0;
-        if (!g_app_touch || !appwin_alive(g_app_touch)) {
-            g_app_touch = nullptr;
-            g_owner = OWNER_NONE;
-            return;
-        }
-        g_app_last_x = fx;
-        g_app_last_y = fy;
-        appwin_touch(g_app_touch, "move", fx, fy);
-        return;
-    }
 
     // ---------- owner PINCH: two fingers resize the window ----------
     if (g_owner == OWNER_PINCH) {
@@ -514,18 +492,6 @@ static void handle_frame() {
                g_in.slots[g_primary_slot].x, g_in.slots[g_primary_slot].y, fx, fy,
                g_in.xmin, g_in.xmax, g_in.ymin, g_in.ymax);
         View *hv = hit_test(fx, fy);
-        // A hosted Android window sits above the Wayland layers, so a touch inside it is
-        // forwarded to its display instead of being treated as a miss.
-        AppWin *app = appwin_at(fx, fy);
-        if (app && (!hv || !hv->mapped || hv->is_x_root)) {
-            g_owner = OWNER_APP;
-            g_app_touch = app;
-            g_app_last_x = fx;
-            g_app_last_y = fy;
-            appwin_touch(app, "down", fx, fy);
-            printf("[app] touch down in slot %d at %d,%d\n", app->slot, fx - app->x, fy - app->y);
-            return;
-        }
         int corner = corner_hit(hv, fx, fy);
         // A corner press no longer resizes immediately: it is armed first and only starts
         // once the finger moves past the threshold.

@@ -38,7 +38,7 @@ class VirtualOutputs(
     private val panels = PanelReader(context)
     private val displays = OutputSurfaceFactory(context)
     private val injector = TouchInjector()
-    private val stage = OutputStage(context, ::attach, ::detach)
+    private val stage = OutputStage(context, ::attach, ::detach, ::forwardTouch)
     private val slots = settings.outputs.coerceIn(0, MAX_SLOTS)
     private val requests = LinkedHashMap<Int, SlotRequest>()
     // What has already been started on which display, so a resize does not relaunch an app.
@@ -141,9 +141,24 @@ class VirtualOutputs(
      */
     fun publishNow() = publish()
 
+    /**
+     * Touch that reached a hosted window. The coordinates are the window's own, which are the
+     * display's: the window is exactly as large as the display it hosts.
+     */
+    private fun forwardTouch(slot: Int, event: android.view.MotionEvent) {
+        val phase = when (event.actionMasked) {
+            android.view.MotionEvent.ACTION_DOWN -> "down"
+            android.view.MotionEvent.ACTION_MOVE -> "move"
+            android.view.MotionEvent.ACTION_UP -> "up"
+            android.view.MotionEvent.ACTION_CANCEL -> "cancel"
+            else -> return
+        }
+        val displayId = displays.displayIdOf(slot) ?: return
+        injector.send(displayId, phase, event.x, event.y, event.getPointerId(0))
+    }
+
     /** Delivers one touch event to the display behind [slot], in that display's pixels. */
-    fun touch(slot: Int, phase: String, x: Float, y: Float, id: Int) {
-        val displayId = displays.displayIdOf(slot)
+    fun touch(slot: Int, phase: String, x: Float, y: Float, id: Int) {        val displayId = displays.displayIdOf(slot)
         if (displayId == null) {
             Logs.w("touch for slot $slot dropped: the slot has no display")
             return

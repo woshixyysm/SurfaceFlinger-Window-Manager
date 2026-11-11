@@ -192,31 +192,7 @@ static void appwin_close(int32_t slot) {
     if (appwin_send(line)) printf("[app] %s\n", line);
 }
 
-// ------------------------------------------------------------------ touch
-// The window is above the Wayland layers, so a touch that lands in its rectangle is the
-// module's, not the compositor's: it is forwarded in the hosted display's own pixels.
-static AppWin *appwin_at(int32_t x, int32_t y) {
-    for (AppWin *a : g_apps) {
-        if (a->w <= 0 || a->h <= 0) continue;
-        if (x < a->x || x >= a->x + a->w) continue;
-        if (y < a->y || y >= a->y + a->h) continue;
-        return a;
-    }
-    return nullptr;
-}
 
-static void appwin_touch(AppWin *a, const char *phase, int32_t sx, int32_t sy) {
-    if (!a) return;
-    char line[128];
-    snprintf(line, sizeof(line), "touch %d %s %d %d", a->slot, phase, sx - a->x, sy - a->y);
-    appwin_send(line);
-}
-
-// A window can disappear between two touch events, so the pointer is checked first.
-static bool appwin_alive(AppWin *a) {
-    for (AppWin *o : g_apps) if (o == a) return true;
-    return false;
-}
 
 static void appwin_list() {    if (g_apps.empty()) {
         printf("[app] no Android window; 'app open <slot> <package|home>' starts one\n");
