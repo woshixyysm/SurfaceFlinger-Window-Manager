@@ -163,6 +163,22 @@ hosted display, so a tile appears either way.
 The same slot can be configured up front with `output.<n>.package=` (`home` or a package) and
 `outputs=<n>`; a slot with no package stays a plain output.
 
+## Android windows that are not hosted
+
+The shell's own floating windows — the task switcher a swipe-up opens, and the "small window"
+(`com.oplus.pscanvas` / `OplusFlexibleWindowUI`, launched from `com.coloros.smartsidebar`) —
+are ordinary application-band content: the small window is a `ContainerActivity` that hosts
+embedded task surfaces through `FlexibleWindowManager`, and the sidebar launches everything
+with `setLaunchDisplayId(0)`. The host windows here are `TYPE_APPLICATION_OVERLAY` (2038),
+which the window manager sorts above that band, so those windows are drawn underneath and are
+never seen. Hiding the hosts while they are up works but is not compatibility, only a truce.
+
+The compatible answer is to put the hosts in the same band: one activity per host window,
+launched as a freeform task with `setLaunchWindowingMode(FREEFORM)` + `setLaunchBounds`, so
+that ordering against the shell's own windows follows focus the way it does for any other
+application. That is the same shape the vendor uses for its small window, and it removes the
+"who is above whom" question instead of answering it per feature.
+
 ## Input observation
 
 Three framework observation points, all in the input method's own process:

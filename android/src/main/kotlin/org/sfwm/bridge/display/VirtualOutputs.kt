@@ -48,6 +48,9 @@ class VirtualOutputs(
     private var running = false
     private var panelWatcher: BroadcastReceiver? = null
     private var keyguard: KeyguardWatcher? = null
+    private var sweep: Runnable? = null
+    private var lastSlot = 0
+    private val movedTasks = HashSet<Int>()
 
     fun start() {
         if (running) return
@@ -61,6 +64,7 @@ class VirtualOutputs(
         }
         watchPanel()
         watchKeyguard()
+        startSweep()
         Logs.i(
             "outputs started: $slots slot(s), channel=${settings.channel}, " +
                 "panel=${panel.width}x${panel.height}@${panel.densityDpi}",
@@ -72,6 +76,8 @@ class VirtualOutputs(
         running = false
         keyguard?.stop()
         keyguard = null
+        sweep?.let { Handler(Looper.getMainLooper()).removeCallbacks(it) }
+        sweep = null
         unwatchPanel()
         stage.unmountAll()
         displays.forgetAll()
@@ -154,6 +160,7 @@ class VirtualOutputs(
             else -> return
         }
         val displayId = displays.displayIdOf(slot) ?: return
+        lastSlot = slot
         injector.send(displayId, phase, event.x, event.y, event.getPointerId(0))
     }
 
@@ -163,7 +170,110 @@ class VirtualOutputs(
             Logs.w("touch for slot $slot dropped: the slot has no display")
             return
         }
+        lastSlot = slot
         injector.send(displayId, phase, x, y, id)
+    }
+
+    // ----------------------------------------------------------- stray Android windows
+    // The compositor owns the default display, so a task that lands there — the recents of a
+    // swipe-up, a freeform "small window" started by the shell — is composited under the host
+    // windows and is never seen. Those tasks are moved onto the display of the slot that was
+    // touched last, which is where the user is looking. Root tasks are moved, which is the
+    // same call that puts the launcher on a hosted display.
+
+    private fun startSweep() {
+        if (sweep != null) return
+        val handler = Handler(Looper.getMainLooper())
+        val task = object : Runnable {
+            override fun run() {
+                if (!running) return
+                Thread { runCatching { sweepDefaultDisplay() }.onFailure { Logs.w("sweep failed", it) } }
+                    .start()
+                handler.postDelayed(this, SWEEP_INTERVAL_MS)
+            }
+        }
+        sweep = task
+        handler.postDelayed(task, SWEEP_INTERVAL_MS)
+    }
+
+    private fun sweepDefaultDisplay() {
+        // The shell belongs on the display of the slot that hosts it; boot can miss it.
+        val home = strayTasks(DEFAULT_DISPLAY).firstOrNull { it.type == "home" } ?: return
+        val target = targetFor(home) ?: return
+        if (target == DEFAULT_DISPLAY || !movedTasks.add(home.id)) return
+        if (moveRootTask(home.id, target)) {
+            Logs.i("moved the launcher task ${home.id} to display $target")
+        }
+    }
+
+    /**
+     * Where a stray task belongs. The shell goes back to the slot configured to host it, and
+     * everything else follows the slot that was touched last.
+     */
+    private fun targetFor(task: StrayTask): Int? {
+        if (task.type == "home") {
+            val slot = requests.entries.firstOrNull { it.value.packageName == HOME }?.key ?: return null
+            return displays.displayIdOf(slot)
+        }
+        return displays.displayIdOf(lastSlot)
+    }
+
+    /**
+     * A root task on the default display that the platform would draw under the host windows.
+     * Three kinds show up there: the shell itself, a freeform "small window", and the task
+     * switcher the gesture opens. Anything else — dialogs, permission prompts — is left alone.
+     */
+    private class StrayTask(val id: Int, val type: String, val mode: String, val component: String?) {
+        val what: String
+            get() = when {
+                type == "home" -> "launcher"
+                mode == "freeform" -> "small-window"
+                else -> "recents"
+            }
+
+        val worthMoving: Boolean
+            get() = type == "home" || mode == "freeform" ||
+                (component?.contains("recents", ignoreCase = true) == true)
+    }
+
+    /** Root tasks the platform lists under [displayId], with what they are running. */
+    private fun strayTasks(displayId: Int): List<StrayTask> {
+        val proc = Runtime.getRuntime().exec(arrayOf("sh", "-c", "dumpsys activity activities"))
+        val text = proc.inputStream.bufferedReader().readText()
+        proc.waitFor()
+        var current = -1
+        val tasks = mutableListOf<StrayTask>()
+        var open: StrayTask? = null
+        for (line in text.lineSequence()) {
+            val header = DISPLAY_HEADER.find(line)
+            if (header != null) {
+                current = header.groupValues[1].toInt()
+                open = null
+                continue
+            }
+            if (current != displayId) continue
+            val root = ROOT_TASK.find(line)
+            if (root != null) {
+                open = StrayTask(root.groupValues[1].toInt(), root.groupValues[2], root.groupValues[3], null)
+                tasks += open
+                continue
+            }
+            val activity = TOP_ACTIVITY.find(line) ?: continue
+            val task = open ?: continue
+            if (activity.groupValues[2].toInt() == task.id) {
+                tasks[tasks.size - 1] = StrayTask(task.id, task.type, task.mode, activity.groupValues[1])
+            }
+        }
+        return tasks.filter { it.worthMoving }
+    }
+
+    private fun moveRootTask(taskId: Int, displayId: Int): Boolean {
+        val atm = atmService() ?: return false
+        return runCatching {
+            atm.javaClass
+                .getMethod("moveRootTaskToDisplay", Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
+                .invoke(atm, taskId, displayId) as? Boolean ?: false
+        }.onFailure { Logs.w("moveRootTaskToDisplay($taskId, $displayId) failed", it) }.getOrDefault(false)
     }
 
     private fun placementOf(slot: Int): OutputPlacement = settings.placement(slot, panel)
@@ -337,9 +447,9 @@ class VirtualOutputs(
      */
     private fun watchKeyguard() {
         if (keyguard != null) return
-        val watcher = KeyguardWatcher(context) { locked ->
-            stage.setVisible(!locked)
-            BridgeReport.markLocked(locked, panel.height)
+        val watcher = KeyguardWatcher(context) { isLocked ->
+            stage.setVisible(!isLocked)
+            BridgeReport.markLocked(isLocked, panel.height)
             publish()
         }
         keyguard = watcher
@@ -370,6 +480,21 @@ class VirtualOutputs(
 
         /** ActivityTaskManager's ACTIVITY_TYPE_HOME, needed to pick the launcher's root task. */
         const val ACTIVITY_TYPE_HOME = 2
+
+        /** The display the compositor owns; Android tasks that land here are moved away. */
+        const val DEFAULT_DISPLAY = 0
+
+        /** A `dumpsys` per sweep is cheap enough at this rate and needs no hidden API. */
+        const val SWEEP_INTERVAL_MS = 3000L
+
+        /** `Display #5 (activities from top to bottom):` */
+        val DISPLAY_HEADER = Regex("^Display #(\\d+) ")
+
+        /** A root task line: `  * Task{b08c049 #18969 type=standard ... mode=freeform ...}`. */
+        val ROOT_TASK = Regex("^ {2}\\* Task\\{[^#]*#(\\d+) type=(\\S+).*?mode=(\\S+)")
+
+        /** `topResumedActivity=ActivityRecord{8351127 u0 pkg/.Cls t18967}` */
+        val TOP_ACTIVITY = Regex("topResumedActivity=ActivityRecord\\{\\w+ u\\d+ ([^\\s]+) t(\\d+)\\}")
 
         /** Only used when the panel cannot be read at all; never preferred over a real one. */
         val FALLBACK_PANEL = PanelMetrics(1080, 2400, 420)
