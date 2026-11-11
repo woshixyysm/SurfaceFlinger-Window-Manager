@@ -516,6 +516,7 @@ static void handle_frame() {
                g_in.slots[g_primary_slot].x, g_in.slots[g_primary_slot].y, fx, fy,
                g_in.xmin, g_in.xmax, g_in.ymin, g_in.ymax);
         View *hv = hit_test(fx, fy);
+        cursor_from_touch();   // a finger: no cursor while it is down
         // Which tile the press belongs to is the layout's answer, not the hit test's: a
         // client that has not resized yet still covers the screen with its old geometry, and
         // would otherwise swallow the touches of the tile beside it.
@@ -803,6 +804,64 @@ static int on_key_fd(int fd, uint32_t, void *) {
         // value 2 is an autorepeat, which the compositor synthesises itself.
         if (ev[i].value == 0) kb_key((uint32_t)ev[i].code, false);
         else if (ev[i].value == 1) kb_key((uint32_t)ev[i].code, true);
+    }
+    return 0;
+}
+
+/**
+ * A mouse is a device that reports relative motion and buttons, not a panel: EV_REL with the
+ * two axes and BTN_LEFT on the key bitmap. While it is grabbed the pointer is drawn here and
+ * delivered here; released, the shell draws its own cursor and dispatches by itself.
+ */
+static int open_pointer_device() {
+    for (int i = 0; i < 32; i++) {
+        char path[64], name[96] = {0};
+        snprintf(path, sizeof path, "/dev/input/event%d", i);
+        int fd = open(path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) continue;
+
+        unsigned long rbits[(REL_MAX / (8 * sizeof(unsigned long))) + 2] = {0};
+        if (ioctl(fd, EVIOCGBIT(EV_REL, sizeof(rbits)), rbits) < 0) { close(fd); continue; }
+        auto hasrel = [&](int code) {
+            return (rbits[code / (8 * sizeof(unsigned long))] >> (code % (8 * sizeof(unsigned long)))) & 1ul;
+        };
+        unsigned long kbits[(KEY_MAX / (8 * sizeof(unsigned long))) + 2] = {0};
+        if (ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(kbits)), kbits) < 0) { close(fd); continue; }
+        auto haskey = [&](int code) {
+            return (kbits[code / (8 * sizeof(unsigned long))] >> (code % (8 * sizeof(unsigned long)))) & 1ul;
+        };
+        if (!hasrel(REL_X) || !hasrel(REL_Y) || !haskey(BTN_LEFT)) { close(fd); continue; }
+
+        ioctl(fd, EVIOCGNAME(sizeof name), name);
+        printf("[input] %s '%s' is a mouse\n", path, name);
+        return fd;
+    }
+    return -1;
+}
+
+/** Where the mouse is, in screen pixels; kept across devices and grabs. */
+static int32_t g_mouse_x = 0, g_mouse_y = 0;
+
+static int on_pointer_fd(int fd, uint32_t, void *) {
+    struct input_event ev[64];
+    const int n = (int)read(fd, ev, sizeof(ev));
+    if (n <= 0) return 0;
+    bool moved = false;
+    for (int i = 0; i < n / (int)sizeof(struct input_event); i++) {
+        if (ev[i].type == EV_REL) {
+            if (ev[i].code == REL_X) { g_mouse_x += ev[i].value; moved = true; }
+            else if (ev[i].code == REL_Y) { g_mouse_y += ev[i].value; moved = true; }
+        } else if (ev[i].type == EV_KEY) {
+            if (ev[i].code == BTN_LEFT) mouse_button(g_mouse_x, g_mouse_y, ev[i].value != 0);
+        } else if (ev[i].type == EV_SYN && ev[i].code == SYN_REPORT && moved) {
+            if (g_mouse_x < 0) g_mouse_x = 0;
+            if (g_mouse_y < 0) g_mouse_y = 0;
+            if (g_mouse_x > g_out_w - 1) g_mouse_x = g_out_w - 1;
+            if (g_mouse_y > g_out_h - 1) g_mouse_y = g_out_h - 1;
+            cursor_from_pointer();               // a pointer is present: the cursor is drawn
+            pointer_motion(g_mouse_x, g_mouse_y, true);
+            cursor_present();
+        }
     }
     return 0;
 }

@@ -383,13 +383,23 @@ static void dd_focus_changed(View *v);   // protocol/data_device.hpp: the clipbo
 // Its keys are taken away from the shell only while a Wayland client has the focus: an
 // Android window is typed into by the shell, which hands the keys to its display itself.
 static int  g_kbd_fd = -1;
+static int  g_ptr_fd = -1;   // the mouse, once one is found (input/touch.hpp sets it)
 static bool g_kbd_grabbed = false;
 
+/**
+ * Input devices belong to whoever has the focus. A Wayland window gets the real keyboard and
+ * mouse, so the compositor draws the cursor and delivers the events itself; an Android window
+ * is typed and pointed at by the shell, which then draws the system cursor and its touch halo
+ * and hands everything to the host window.
+ */
 static void kb_device_grab(bool grab) {
-    if (g_kbd_fd < 0 || grab == g_kbd_grabbed) return;
-    if (ioctl(g_kbd_fd, EVIOCGRAB, grab ? 1 : 0) < 0) return;
+    if (grab == g_kbd_grabbed) return;
+    bool any = false;
+    if (g_kbd_fd >= 0 && ioctl(g_kbd_fd, EVIOCGRAB, grab ? 1 : 0) == 0) any = true;
+    if (g_ptr_fd >= 0 && ioctl(g_ptr_fd, EVIOCGRAB, grab ? 1 : 0) == 0) any = true;
+    if (!any && (g_kbd_fd >= 0 || g_ptr_fd >= 0)) return;
     g_kbd_grabbed = grab;
-    printf("[kbd] keyboard %s\n", grab ? "taken from the shell" : "returned to the shell");
+    printf("[kbd] input devices %s\n", grab ? "taken from the shell" : "returned to the shell");
 }
 
 static void kb_set_focus(View *v) {

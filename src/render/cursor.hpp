@@ -424,7 +424,25 @@ static void cursor_build(uint32_t shape) {
 }
 
 // place the cursor at g_cur_x, g_cur_y in physical pixels
+/**
+ * What the last input came from. Only a pointer can have a cursor, so while the panel is the
+ * source nothing is drawn: a finger has nothing to point with, and the compositor must not put
+ * a picture over the tile it is touching. A mouse event clears the flag again.
+ */
+static bool g_cur_touch_only = true;
+
+static void cursor_from_touch(void) { g_cur_touch_only = true; }
+static void cursor_from_pointer(void) { g_cur_touch_only = false; }
+static void cursor_hide(void);
+
 static void cursor_present(void) {
+    // A finger is not a pointer: it has nothing to point with, so a cursor is only drawn for
+    // a real mouse or touchpad. The flag is cleared as soon as one moves, so plugging a mouse
+    // in brings the cursor back without any other change.
+    if (g_cur_touch_only) {
+        cursor_hide();
+        return;
+    }
     if (g_have_client_cursor) {
         if (g_cur_layer.win) {
             g_cur_layer.hide();
@@ -492,6 +510,8 @@ static void cursor_hide(void) {
         g_cur_shown = false;
     }
 }
+
+
 
 static uint32_t now_ms() {
     struct timespec ts;

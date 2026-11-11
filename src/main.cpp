@@ -194,12 +194,18 @@ int main(int argc, char **argv) {
         printf("[input] no touch device found; reading /dev/input requires root\n");
     }
 
-    // A physical keyboard is a second source of keys, next to the injection socket. It is
-    // read here and, while a Wayland window has the focus, also grabbed, so the shell does
-    // not consume the keys first.
+    // A physical keyboard and mouse are two more input sources, next to the injection socket.
+    // They are read here and, while a Wayland window has the focus, also grabbed, so the shell
+    // neither consumes the keys nor draws a cursor of its own.
     g_kbd_fd = open_keyboard_device();
     if (g_kbd_fd >= 0)
         wl_event_loop_add_fd(g_srv.loop, g_kbd_fd, WL_EVENT_READABLE, on_key_fd, nullptr);
+    g_ptr_fd = open_pointer_device();
+    if (g_ptr_fd >= 0) {
+        g_mouse_x = g_out_w / 2;
+        g_mouse_y = g_out_h / 2;
+        wl_event_loop_add_fd(g_srv.loop, g_ptr_fd, WL_EVENT_READABLE, on_pointer_fd, nullptr);
+    }
 
     sfwm_keys_init();   // keyboard injection socket
 
