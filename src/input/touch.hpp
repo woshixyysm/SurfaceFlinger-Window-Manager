@@ -702,6 +702,54 @@ static int open_touch_device(bool grab) {
     return -1;
 }
 
+/**
+ * A keyboard is a device that reports key codes for typing, not a touchscreen: it has
+ * EV_KEY with the letters on it and none of the multi-touch axes. It is opened like the
+ * touchscreen, but the keys are only taken away from the shell while a Wayland window has
+ * the focus (see kb_device_grab), because an Android window is typed into by the shell.
+ */
+static int open_keyboard_device() {
+    for (int i = 0; i < 32; i++) {
+        char path[64], name[96] = {0};
+        snprintf(path, sizeof path, "/dev/input/event%d", i);
+        int fd = open(path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) continue;
+
+        unsigned long kbits[(KEY_MAX / (8 * sizeof(unsigned long))) + 2] = {0};
+        if (ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(kbits)), kbits) < 0) { close(fd); continue; }
+        auto has = [&](int code) {
+            return (kbits[code / (8 * sizeof(unsigned long))] >> (code % (8 * sizeof(unsigned long)))) & 1ul;
+        };
+        if (!has(KEY_A) || !has(KEY_ENTER) || !has(KEY_SPACE)) { close(fd); continue; }
+
+        unsigned long abits[(ABS_MAX / (8 * sizeof(unsigned long))) + 2] = {0};
+        if (ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(abits)), abits) < 0) { close(fd); continue; }
+        auto hasabs = [&](int code) {
+            return (abits[code / (8 * sizeof(unsigned long))] >> (code % (8 * sizeof(unsigned long)))) & 1ul;
+        };
+        if (hasabs(ABS_MT_POSITION_X)) { close(fd); continue; }   // that is a touchscreen
+
+        ioctl(fd, EVIOCGNAME(sizeof name), name);
+        printf("[input] %s '%s' is a keyboard\n", path, name);
+        return fd;
+    }
+    return -1;
+}
+
+/** One read of the keyboard device: every key event becomes a key for the focused window. */
+static int on_key_fd(int fd, uint32_t, void *) {
+    struct input_event ev[64];
+    const int n = (int)read(fd, ev, sizeof(ev));
+    if (n <= 0) return 0;
+    for (int i = 0; i < n / (int)sizeof(struct input_event); i++) {
+        if (ev[i].type != EV_KEY) continue;
+        // value 2 is an autorepeat, which the compositor synthesises itself.
+        if (ev[i].value == 0) kb_key((uint32_t)ev[i].code, false);
+        else if (ev[i].value == 1) kb_key((uint32_t)ev[i].code, true);
+    }
+    return 0;
+}
+
 
 
 

@@ -194,6 +194,13 @@ int main(int argc, char **argv) {
         printf("[input] no touch device found; reading /dev/input requires root\n");
     }
 
+    // A physical keyboard is a second source of keys, next to the injection socket. It is
+    // read here and, while a Wayland window has the focus, also grabbed, so the shell does
+    // not consume the keys first.
+    g_kbd_fd = open_keyboard_device();
+    if (g_kbd_fd >= 0)
+        wl_event_loop_add_fd(g_srv.loop, g_kbd_fd, WL_EVENT_READABLE, on_key_fd, nullptr);
+
     sfwm_keys_init();   // keyboard injection socket
 
     // Poll the bridge's published state for Android windows, so a window opened by the

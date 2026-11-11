@@ -379,6 +379,19 @@ static View *front_view() {
 
 static void dd_focus_changed(View *v);   // protocol/data_device.hpp: the clipboard follows focus
 
+// The physical keyboard device, once one is found (input/touch.hpp sets the descriptor).
+// Its keys are taken away from the shell only while a Wayland client has the focus: an
+// Android window is typed into by the shell, which hands the keys to its display itself.
+static int  g_kbd_fd = -1;
+static bool g_kbd_grabbed = false;
+
+static void kb_device_grab(bool grab) {
+    if (g_kbd_fd < 0 || grab == g_kbd_grabbed) return;
+    if (ioctl(g_kbd_fd, EVIOCGRAB, grab ? 1 : 0) < 0) return;
+    g_kbd_grabbed = grab;
+    printf("[kbd] keyboard %s\n", grab ? "taken from the shell" : "returned to the shell");
+}
+
 static void kb_set_focus(View *v) {
     if (v == g_srv.kb_focus) return;
     View *old_focus = g_srv.kb_focus;
@@ -406,6 +419,7 @@ static void kb_set_focus(View *v) {
     }
     dd_focus_changed(v);   // the new client receives the clipboard, the old one selection(NULL)
     tile_on_focus(v);      // the tiling focus follows the keyboard focus
+    kb_device_grab(v != nullptr);
 }
 
 // The Android window that holds the tile focus, if any: it takes the key instead of a
