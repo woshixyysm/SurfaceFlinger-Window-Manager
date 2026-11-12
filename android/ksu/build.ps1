@@ -48,6 +48,12 @@ Write-Host "== system/bin/surfaceflinger (wrapper)"
     (Join-Path $here "src/surfaceflinger_wrapper.c")
 if ($LASTEXITCODE -ne 0) { throw "wrapper build failed" }
 
+Write-Host "== sfinject (hot loader)"
+# Static too: it runs as root on the device and must not depend on anything.
+& $clang @common -static -o (Join-Path $out "sfinject") `
+    (Join-Path $here "src/sfinject.c")
+if ($LASTEXITCODE -ne 0) { throw "sfinject build failed" }
+
 Write-Host "== packaging"
 $stage = Join-Path $out "stage"
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
@@ -55,6 +61,7 @@ New-Item -ItemType Directory -Force -Path $stage | Out-Null
 Copy-Item (Join-Path $here "module.prop") $stage
 Copy-Item (Join-Path $here "customize.sh") $stage
 Copy-Item (Join-Path $here "sepolicy.rule") $stage
+Copy-Item (Join-Path $here "hot.sh") $stage
 Copy-Item (Join-Path $here "README.md") $stage -ErrorAction SilentlyContinue
 Copy-Item -Recurse (Join-Path $here "lib") (Join-Path $stage "lib")
 Copy-Item -Recurse (Join-Path $here "system") (Join-Path $stage "system")

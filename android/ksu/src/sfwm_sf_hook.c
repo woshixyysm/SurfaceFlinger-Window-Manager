@@ -254,11 +254,31 @@ static void *serve(void *unused)
     return NULL;
 }
 
+// Two ways to enable the helper: the module's wrapper sets SFWM_SF_HOOK, and the ptrace
+// injector used while developing just creates ENABLE_FILE, because it cannot set the
+// environment of the process it attaches to.
+#define SFWM_SF_ENABLE "/data/adb/sfwm-sf/enable"
+
+static int socket_alive(void)
+{
+    const int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (s < 0) return 0;
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof addr);
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, SFWM_SF_SOCK, sizeof addr.sun_path - 1);
+    const int ok = connect(s, (struct sockaddr *)&addr, sizeof addr) == 0;
+    close(s);
+    return ok;
+}
+
 __attribute__((constructor)) static void sfwm_sf_hook_init(void)
 {
-    // Never run this by accident: the wrapper sets the variable, so a stray LD_PRELOAD from
-    // somewhere else leaves the system completely untouched.
-    if (!getenv("SFWM_SF_HOOK")) return;
+    // Never run this by accident: either the wrapper sets the variable, or the injector
+    // creates the sentinel file. A stray LD_PRELOAD from somewhere else does nothing.
+    if (!getenv("SFWM_SF_HOOK") && access(SFWM_SF_ENABLE, F_OK) != 0) return;
+    // Hot injection can happen more than once; a second copy would fight for the socket.
+    if (socket_alive()) return;
 
     void *nw = dlopen("libnativewindow.so", RTLD_NOW | RTLD_LOCAL);
     if (!nw) return;

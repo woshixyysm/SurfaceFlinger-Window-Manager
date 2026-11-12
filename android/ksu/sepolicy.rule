@@ -10,3 +10,10 @@
 allow surfaceflinger system_data_file dir { search open read getattr }
 allow surfaceflinger system_data_file file { read open getattr map execute execute_no_trans }
 allow surfaceflinger system_data_file sock_file { read write open create unlink getattr }
+
+# Hot loading while developing: android/ksu/hot.sh injects the helper into the running
+# surfaceflinger with ptrace instead of waiting for a reboot. Only the root shell domain may
+# do this, and it is otherwise harmless: the library only answers one socket request.
+allow ksu surfaceflinger process ptrace;
+allow ksu surfaceflinger process { signal sigchld };
+
