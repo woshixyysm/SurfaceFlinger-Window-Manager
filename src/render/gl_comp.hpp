@@ -161,6 +161,11 @@ struct Api {
     void (*LinkProgram)(unsigned) = nullptr;
     void (*GetProgramiv)(unsigned, unsigned, int *) = nullptr;
     unsigned (*GetError)(void) = nullptr;
+    void (*Finish)(void) = nullptr;
+    void (*Flush)(void) = nullptr;
+    void *(*CreateSync)(EGLDisplay, unsigned, const intptr_t *) = nullptr;
+    int    (*DupNativeFenceFD)(EGLDisplay, void *) = nullptr;
+    int    (*DestroySync)(EGLDisplay, void *) = nullptr;
     const unsigned char *(*GetString)(unsigned) = nullptr;
 };
 
@@ -177,6 +182,22 @@ static float g_flip = -1.f;              // < 0 means take it from SFWM_GL_FLIP
 static unsigned g_fbo = 0, g_ftex = 0;
 static int g_fw = 0, g_fh = 0;
 static int g_fbo_rebuild = 0;     // rebuild counter; a rebuild every frame means the size keeps changing
+
+// Zero-copy output target: the SurfaceFlinger buffer imported as a dmabuf and used
+// directly as the render target, so the composite never travels back through the CPU.
+// One entry per buffer in the SurfaceFlinger BufferQueue: they rotate, and re-importing
+// an EGLImage every frame costs more than the whole composite.
+struct DstEnt {
+    int fd = -1;
+    ino_t ino = 0;
+    uint32_t w = 0, h = 0, fourcc = 0, pitch = 0, off = 0;
+    uint64_t mod = 0;
+    EGLImage img = nullptr;
+    unsigned tex = 0;
+    unsigned fbo = 0;      // one FBO per buffer: CheckFramebufferStatus runs once, not per frame
+};
+static const int DST_N = 8;
+static DstEnt g_dst[DST_N];
 
 // Cache from client dmabuf to EGLImage and texture.
 // The cache key includes the inode: a swapchain rebuild closes the old fd and the
@@ -330,6 +351,11 @@ static bool init() {
     L(TexParameteri); L(TexImage2D); L(GenFramebuffers); L(DeleteFramebuffers);
     L(BindFramebuffer); L(FramebufferTexture2D); L(CheckFramebufferStatus);
     L(Viewport); L(ClearColor); L(Clear); L(ReadPixels); L(PixelStorei);
+    L(Finish); L(Flush);
+    // EGL sync objects live in libEGL under different names than the gl* entry points.
+    *(void **)(&A.CreateSync)       = sym(A, "eglCreateSyncKHR");
+    *(void **)(&A.DupNativeFenceFD) = sym(A, "eglDupNativeFenceFDANDROID");
+    *(void **)(&A.DestroySync)      = sym(A, "eglDestroySyncKHR");
     L(DrawArrays); L(GenVertexArrays); L(BindVertexArray); L(UseProgram);
     L(Uniform1i); L(Uniform1f); L(CreateShader); L(ShaderSource); L(CompileShader);
     L(GetShaderiv); L(GetShaderInfoLog); L(CreateProgram); L(AttachShader);
@@ -551,6 +577,152 @@ inline bool draw(int fd, uint32_t w, uint32_t h, uint32_t fourcc,
                    w, h, fourcc, dst_w, dst_h, dst_stride_px, g_fbo_rebuild);
     }
     return true;
+}
+
+// Composite one client dmabuf straight into the SurfaceFlinger buffer's dmabuf.
+//   d_*: destination buffer taken from ANativeWindow_dequeueBuffer()
+//   crop_w/crop_h: content size inside the (usually output-sized) destination
+// No glReadPixels: the destination becomes the render target through an EGLImage.
+inline bool draw_to_dmabuf(int sfd, uint32_t sw, uint32_t sh, uint32_t sfourcc,
+                           uint32_t sstride, uint32_t soff, uint64_t smod,
+                           int dfd, uint32_t dw, uint32_t dh, uint32_t dfourcc,
+                           uint32_t dpitch, uint32_t doff, uint64_t dmod,
+                           int crop_w, int crop_h, bool opaque) {
+    if (!ready() || dfd < 0 || dw == 0 || dh == 0) return false;
+    if (g_flip < 0.f) g_flip = getenv("SFWM_GL_FLIP") ? 1.f : 0.f;
+
+    const unsigned stex = tex_for(sfd, sw, sh, sfourcc, sstride, soff, smod);
+    if (!stex) return false;
+
+    struct stat st;
+    ino_t ino = 0;
+    if (fstat(dfd, &st) == 0) ino = st.st_ino;
+    DstEnt *dst = nullptr;
+    for (int i = 0; i < DST_N; i++) {
+        DstEnt &d = g_dst[i];
+        if (d.tex && d.fd == dfd && d.ino == ino && d.w == dw && d.h == dh &&
+            d.fourcc == dfourcc && d.pitch == dpitch && d.off == doff && d.mod == dmod) {
+            dst = &d;
+            break;
+        }
+    }
+    if (!dst) {
+        // Prefer a free slot, then one holding a different fd.
+        for (int i = 0; i < DST_N && !dst; i++) if (!g_dst[i].tex) dst = &g_dst[i];
+        for (int i = 0; i < DST_N && !dst; i++) if (g_dst[i].fd != dfd) dst = &g_dst[i];
+        if (!dst) dst = &g_dst[0];
+        if (dst->fbo) { A.DeleteFramebuffers(1, &dst->fbo); dst->fbo = 0; }
+        if (dst->tex) { A.DeleteTextures(1, &dst->tex); dst->tex = 0; }
+        if (dst->img && A.DestroyImage) { A.DestroyImage(g_dpy, dst->img); dst->img = nullptr; }
+        *dst = DstEnt();
+        const EGLint ia[] = {
+            EGL_WIDTH_,  (EGLint)dw,
+            EGL_HEIGHT_, (EGLint)dh,
+            EGL_LINUX_DRM_FOURCC_EXT_, (EGLint)dfourcc,
+            EGL_DMA_BUF_PLANE0_FD_EXT_, (EGLint)dfd,
+            EGL_DMA_BUF_PLANE0_OFFSET_EXT_, (EGLint)doff,
+            EGL_DMA_BUF_PLANE0_PITCH_EXT_, (EGLint)dpitch,
+            EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT_, (EGLint)(dmod & 0xffffffffu),
+            EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT_, (EGLint)(dmod >> 32),
+            EGL_IMAGE_PRESERVED_KHR_, EGL_TRUE_,
+            EGL_NONE_
+        };
+        dst->img = A.CreateImage(g_dpy, EGL_NO_CONTEXT_, EGL_LINUX_DMA_BUF_EXT_,
+                                 nullptr, (const intptr_t *)ia);
+        if (!dst->img) {
+            static int n = 0;
+            if (n++ < 6)
+                printf("[zc] eglCreateImageKHR(dst) failed fd=%d %ux%u pitch=%u fourcc=0x%x\n",
+                       dfd, dw, dh, dpitch, dfourcc);
+            dst->fd = -1;
+            return false;
+        }
+        A.GenTextures(1, &dst->tex);
+        A.BindTexture(GL_TEXTURE_2D_, dst->tex);
+        A.EGLImageTargetTexture2DOES(GL_TEXTURE_2D_, dst->img);
+        const unsigned e = A.GetError();
+        if (e) {
+            static int n = 0;
+            if (n++ < 6) printf("[zc] glEGLImageTargetTexture2DOES(dst) err=0x%x\n", e);
+            A.DeleteTextures(1, &dst->tex); dst->tex = 0;
+            if (A.DestroyImage) A.DestroyImage(g_dpy, dst->img);
+            dst->img = nullptr; dst->fd = -1;
+            return false;
+        }
+        // Attach and validate once per destination buffer. Doing this every frame makes
+        // the driver flush, which showed up as most of the composite time.
+        A.GenFramebuffers(1, &dst->fbo);
+        A.BindFramebuffer(GL_FRAMEBUFFER_, dst->fbo);
+        A.FramebufferTexture2D(GL_FRAMEBUFFER_, GL_COLOR_ATTACHMENT0_,
+                               GL_TEXTURE_2D_, dst->tex, 0);
+        const unsigned fs = A.CheckFramebufferStatus(GL_FRAMEBUFFER_);
+        if (fs != GL_FRAMEBUFFER_COMPLETE_) {
+            static int n = 0;
+            if (n++ < 6) printf("[zc] dst FBO incomplete 0x%x (%ux%u)\n", fs, dw, dh);
+            A.DeleteFramebuffers(1, &dst->fbo); dst->fbo = 0;
+            A.DeleteTextures(1, &dst->tex); dst->tex = 0;
+            if (A.DestroyImage) A.DestroyImage(g_dpy, dst->img);
+            dst->img = nullptr; dst->fd = -1;
+            return false;
+        }
+        dst->fd = dfd; dst->ino = ino; dst->w = dw; dst->h = dh;
+        dst->fourcc = dfourcc; dst->pitch = dpitch; dst->off = doff; dst->mod = dmod;
+    }
+
+    A.BindFramebuffer(GL_FRAMEBUFFER_, dst->fbo);
+
+    // Clear the whole buffer once a frame so the cropped-away area never shows stale
+    // pixels when SurfaceFlinger repaints from another layer. When the content already
+    // covers the whole buffer the clear writes every pixel twice, so skip it.
+    if (crop_w > 0 && (crop_w < (int)dw || crop_h < (int)dh)) {
+        A.Viewport(0, 0, (int)dw, (int)dh);
+        A.ClearColor(0.f, 0.f, 0.f, 1.f);
+        A.Clear(GL_COLOR_BUFFER_BIT_);
+    }
+
+    A.Viewport(0, 0, crop_w > 0 ? crop_w : (int)dw, crop_h > 0 ? crop_h : (int)dh);
+    A.UseProgram(g_prog);
+    if (g_uni_tex >= 0)    A.Uniform1i(g_uni_tex, 0);
+    if (g_uni_flip >= 0)   A.Uniform1f(g_uni_flip, g_flip);
+    if (g_uni_opaque >= 0) A.Uniform1f(g_uni_opaque, opaque ? 1.f : 0.f);
+    A.BindTexture(GL_TEXTURE_2D_, stex);
+    A.DrawArrays(GL_TRIANGLE_STRIP_, 0, 4);
+    const unsigned de = A.GetError();
+    if (de) {
+        static int n = 0;
+        if (n++ < 6) printf("[zc] dst draw err=0x%x\n", de);
+        return false;
+    }
+    return true;
+}
+
+// Fd that signals when the GPU has finished the composite, for ANativeWindow_queueBuffer.
+// Using a fence instead of glFinish keeps the client's next frame from waiting for the
+// previous composite to retire. Returns -1 (after a full finish) when unsupported.
+inline int present_fence_fd() {
+    static const unsigned EGL_SYNC_FENCE_KHR_ = 0x30F9;
+    static const bool no_finish = getenv("SFWM_ZC_NOFINISH") != nullptr;
+    static int dbg = 0;
+    if (A.CreateSync && A.DupNativeFenceFD && A.DestroySync) {
+        if (A.Flush) A.Flush();
+        void *s = A.CreateSync(g_dpy, EGL_SYNC_FENCE_KHR_, nullptr);
+        if (s) {
+            const int fd = A.DupNativeFenceFD(g_dpy, s);
+            A.DestroySync(g_dpy, s);
+            if (dbg++ < 1) printf("[zc] fence fd=%d\n", fd);
+            if (fd >= 0) return fd;
+        }
+    }
+    if (dbg++ < 1) printf("[zc] no native fence, %s\n",
+                          no_finish ? "flushing only" : "falling back to glFinish");
+    if (no_finish) {
+        // Submitting without waiting: the driver keeps the ordering through the implicit
+        // dma-buf fence, but every GPU stall then lands in SurfaceFlinger instead.
+        if (A.Flush) A.Flush();
+        return -1;
+    }
+    if (A.Finish) A.Finish();
+    return -1;
 }
 
 }  // namespace glc

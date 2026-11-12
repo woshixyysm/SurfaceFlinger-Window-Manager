@@ -23,12 +23,32 @@ static void lock_on_mapped(View *v);        // ext-session-lock: first map of th
 // A frame callback does not mean "shown on screen"; it means "you may draw the next
 // frame". Sending wl_callback.done straight from commit() gives clients no rate limit,
 // so GPU clients redraw as fast as they can and recycle dmabufs while the compositor is
-// still sampling them. Defer the callbacks and release them from a 16 ms timer instead.
+// still sampling them. Defer the callbacks and release them once per display refresh
+// instead.
 //     "kitty already uses the wayland render frame protocol to throttle rendering"
 struct FrameSlot { wl_listener lis; wl_resource *cb; };
 static std::vector<wl_resource *> g_frame_pending;
 static wl_event_source *g_frame_timer = nullptr;
 static bool g_frame_armed = false;   // one-shot timer: re-armed on every tick
+
+// Callback cadence: one batch per display refresh (8 ms covers a 120 Hz panel).
+// Sending them every 16 ms capped every client at 60 fps regardless of the panel.
+// SFWM_FPS=0 disables the throttle entirely, like an uncapped launcher: clients then
+// render as fast as the GPU allows while SurfaceFlinger still presents at its own rate.
+static int frame_interval_ms() {
+    static int ms = -2;
+    if (ms == -2) {
+        const char *e = getenv("SFWM_FPS");
+        if (e && atoi(e) <= 0) {
+            ms = 0;
+        } else {
+            const int fps = e ? atoi(e) : 120;
+            ms = fps > 0 ? 1000 / fps : 8;
+            if (ms < 1) ms = 1;
+        }
+    }
+    return ms;
+}
 
 static void frame_cb_gone(wl_listener *l, void *) {
     FrameSlot *s = wl_container_of(l, s, lis);
@@ -41,8 +61,8 @@ static void frame_cb_gone(wl_listener *l, void *) {
 // Declared after struct View, which holds the callback it consumes.
 static void frame_defer(View *v);
 
-// Every ~16 ms: release the queued frame callbacks and re-arm the timer. The timer is
-// one-shot, so a tick that forgets to re-arm stops the clock and strands the queue.
+// Once per refresh: release the queued frame callbacks and re-arm the timer. The timer
+// is one-shot, so a tick that forgets to re-arm stops the clock and strands the queue.
 static int on_frame_tick(void *) {
     if (!g_frame_pending.empty()) {
         std::vector<wl_resource *> batch;
@@ -54,7 +74,7 @@ static int on_frame_tick(void *) {
         }
     }
     if (!g_frame_pending.empty()) {          // callbacks arrived this tick: keep the cadence
-        if (g_frame_timer) wl_event_source_timer_update(g_frame_timer, 16);
+        if (g_frame_timer) wl_event_source_timer_update(g_frame_timer, frame_interval_ms());
     } else {
         g_frame_armed = false;               // idle: arm again on the next callback
     }
@@ -74,6 +94,7 @@ struct dma_buf_export_sync_file { uint32_t flags; int32_t fd; };
 #endif
 #include <poll.h>
 #include <sys/ioctl.h>
+#include <unistd.h>
 
 static bool g_fence_ok = false;
 static bool g_fence_checked = false;
@@ -568,6 +589,94 @@ struct View {
                             clamp_on_screen();
                     }
 
+
+                    // Direct scanout: give the client's dmabuf to SurfaceFlinger as it is,
+                    // with no texture import and no read-back. Opt-in while it is being
+                    // brought up; the GL path below stays the default.
+                    static const bool direct_on = getenv("SFWM_DIRECT") != nullptr;
+                    if (direct_on && !is_cursor && direct::present(layer.win, db)) {
+                        sync_signal_release(this);
+                        wl_buffer_send_release(buffer);
+                        return;
+                    }
+
+                    // Zero-copy output: composite directly into the SurfaceFlinger
+                    // buffer's dmabuf instead of locking it and reading pixels back.
+                    // On by default; SFWM_ZC=0 falls back to the lock + glReadPixels path.
+                    const char *zc_env = getenv("SFWM_ZC");
+                    const bool zc_on = use_gl && !is_cursor && !(zc_env && zc_env[0] == '0');
+                    if (zc_on) {
+                        typedef int (*Fn_deq)(ANativeWindow *, void **, int *);
+                        typedef int (*Fn_queue)(ANativeWindow *, void *, int);
+                        typedef int (*Fn_cancel)(ANativeWindow *, void *, int);
+                        static Fn_deq p_deq = (Fn_deq)dlsym(RTLD_DEFAULT, "ANativeWindow_dequeueBuffer");
+                        static Fn_queue p_queue = (Fn_queue)dlsym(RTLD_DEFAULT, "ANativeWindow_queueBuffer");
+                        static Fn_cancel p_cancel = (Fn_cancel)dlsym(RTLD_DEFAULT, "ANativeWindow_cancelBuffer");
+                        void *anwb = nullptr;
+                        int facq = -1;
+                        const uint32_t __tzc = now_ms();
+                        if (p_deq && p_queue && p_cancel &&
+                            p_deq(layer.win, &anwb, &facq) == 0 && anwb) {
+                            if (facq >= 0) {
+                                struct pollfd pf = {facq, POLLIN, 0};
+                                poll(&pf, 1, 100);
+                                close(facq);
+                            }
+                            // ANativeWindowBuffer layout on Android 16: width@14 height@15
+                            // stride@16 format@17, native_handle@24 (tagged pointer).
+                            const uint32_t *w32 = (const uint32_t *)anwb;
+                            const void *nh = (const void *)(((uint64_t)w32[25] << 32) | w32[24]);
+                            const uint32_t *hi = (const uint32_t *)nh;
+                            const int dfd = hi[1] >= 1 ? (int)hi[3] : -1;
+                            const int dw = (int)w32[14], dh = (int)w32[15];
+                            const int dstride = (int)w32[16];
+                            // HAL_PIXEL_FORMAT_RGBA_8888 (1) is DRM_FORMAT_ABGR8888,
+                            // HAL_PIXEL_FORMAT_BGRA_8888 (5) is DRM_FORMAT_ARGB8888.
+                            const uint32_t dfourcc = w32[17] == 1 ? 0x34324241u : 0x34325241u;
+                            // Direct scanout, shaped-handle variant: wrap the client dmabuf in a
+                            // handle cloned from a real SurfaceFlinger one and let SurfaceFlinger
+                            // composite it. No blit at all, so the composite cost disappears.
+                            static uint32_t tmpl_ints[40];
+                            static int tmpl_nfds = 0, tmpl_nints = 0;
+                            static const bool shaped_on = getenv("SFWM_DIRECT_SHAPED") != nullptr;
+                            if (shaped_on && tmpl_nints == 0 && hi[2] > 0 && hi[2] <= 40 &&
+                                hi[1] >= 1) {
+                                tmpl_nfds = hi[1];
+                                tmpl_nints = hi[2];
+                                memcpy(tmpl_ints, &hi[3 + hi[1]], (size_t)hi[2] * sizeof(uint32_t));
+                                printf("[zc] handle template captured nfds=%d nints=%d\n",
+                                       tmpl_nfds, tmpl_nints);
+                            }
+                            if (shaped_on && tmpl_nints > 0 &&
+                                direct::present_shaped(layer.win, db, tmpl_ints, tmpl_nfds,
+                                                       tmpl_nints)) {
+                                p_cancel(layer.win, anwb, -1);
+                                if (getenv("SFWM_FRAMETIME") && (++frames % 60) == 0)
+                                    printf("[perf] direct %dx%d -> sf %dx%d %u ms\n",
+                                           db->w, db->h, dw, dh, now_ms() - __tzc);
+                                sync_signal_release(this);
+                                wl_buffer_send_release(buffer);
+                                return;
+                            }
+
+                            if (dfd >= 0 && dw > 0 && dh > 0 &&
+                                glc::draw_to_dmabuf(db->fds[0], db->w, db->h, db->drm_format,
+                                                    db->stride[0], db->offset[0], db->modifier,
+                                                    dfd, (uint32_t)dw, (uint32_t)dh, dfourcc,
+                                                    (uint32_t)dstride * 4u, 0u, 0ull,
+                                                    (int)db->w, (int)db->h, !is_cursor)) {
+                                p_queue(layer.win, anwb, glc::present_fence_fd());
+                                if (getenv("SFWM_FRAMETIME") && (++frames % 30) == 0)
+                                    printf("[perf] zc %dx%d -> sf %dx%d composite %u ms\n",
+                                           db->w, db->h, dw, dh, now_ms() - __tzc);
+                                sync_signal_release(this);
+                                wl_buffer_send_release(buffer);
+                                return;
+                            }
+                            p_cancel(layer.win, anwb, -1);
+                        }
+                    }
+
                     ANativeWindow_Buffer ab;
                     const uint32_t __tlock = now_ms();
                     if (ANativeWindow_lock(layer.win, &ab, nullptr) == 0) {
@@ -578,6 +687,25 @@ struct View {
                         if (use_gl) {
                             static int gframes = 0;
                             const uint32_t __tg = now_ms();
+                            // glc::draw() writes only the top left db->w x db->h. The buffer is
+                            // the output size and the BufferQueue rotates between several of
+                            // them, so the rest would keep stale pixels or stay transparent,
+                            // and SurfaceFlinger shows that whenever another layer repaints.
+                            // Paint each buffer opaque black once: repeating it every frame
+                            // would memset the whole screen for nothing.
+                            if ((int)db->w != ab.width || (int)db->h != ab.height) {
+                                static void *painted[8] = {nullptr};
+                                bool known = false;
+                                for (void *q : painted) if (q == ab.bits) { known = true; break; }
+                                if (!known) {
+                                    for (void *&q : painted) if (!q) { q = ab.bits; break; }
+                                    for (int yy = 0; yy < ab.height; yy++) {
+                                        uint32_t *d = (uint32_t *)((uint8_t *)ab.bits +
+                                                       (size_t)yy * (size_t)ab.stride * 4);
+                                        for (int xx = 0; xx < ab.stride; xx++) d[xx] = 0xFF000000u;
+                                    }
+                                }
+                            }
                             const bool okg = glc::draw(db->fds[0], db->w, db->h,
                                                        db->drm_format, db->stride[0],
                                                        db->offset[0], db->modifier,
@@ -886,15 +1014,23 @@ struct View {
             pres_send_presented(this);
         }
         // Do not send wl_callback.done from here: it grants an unlimited frame rate.
-        // The 16 ms timer releases the callbacks; see the note at the top of the file.
+        // The refresh-rate timer releases the callbacks; see the note at the top.
         frame_defer(this);
         return true;
     }
 };
 
-// Queue frame callbacks into 16 ms batches (defined here because it needs the View type)
+// Queue frame callbacks into per-refresh batches (defined here because it needs the View type)
 static void frame_defer(View *v) {
     if (!v || !v->frame_cb) return;
+    // Uncapped mode: hand the callback straight back. Arming a 0 ms timer would spin the
+    // event loop and starve the sockets instead of releasing the client sooner.
+    if (frame_interval_ms() == 0) {
+        wl_callback_send_done(v->frame_cb, now_ms());
+        wl_resource_destroy(v->frame_cb);
+        v->frame_cb = nullptr;
+        return;
+    }
     FrameSlot *s = new FrameSlot{};
     s->cb = v->frame_cb;
     s->lis.notify = frame_cb_gone;
@@ -903,6 +1039,6 @@ static void frame_defer(View *v) {
     v->frame_cb = nullptr;
     if (!g_frame_armed) {                    // arm on demand
         g_frame_armed = true;
-        if (g_frame_timer) wl_event_source_timer_update(g_frame_timer, 16);
+        if (g_frame_timer) wl_event_source_timer_update(g_frame_timer, frame_interval_ms());
     }
 }

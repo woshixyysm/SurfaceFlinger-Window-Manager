@@ -34,8 +34,19 @@ static void output_send_all(wl_resource *r, uint32_t version) {
         wl_output_send_geometry(r, 0, 0, mm_w, mm_h, WL_OUTPUT_SUBPIXEL_UNKNOWN,
                                 "sfwm", "SurfaceFlinger", WL_OUTPUT_TRANSFORM_NORMAL);
     }
+    // Report the real refresh rate: clients pace their own rendering from this mode,
+    // so a panel running at 165 Hz that is announced as 60 Hz leaves every frame
+    // waiting for a vsync that does not match the compositor's.
+    static int32_t refresh_mhz = -1;
+    if (refresh_mhz < 0) {
+        refresh_mhz = 60000;
+        if (const char *e = getenv("SFWM_REFRESH")) {
+            const int hz = atoi(e);
+            if (hz > 0) refresh_mhz = hz * 1000;
+        }
+    }
     wl_output_send_mode(r, WL_OUTPUT_MODE_CURRENT | WL_OUTPUT_MODE_PREFERRED,
-                        g_out_w, g_out_h, 60000);
+                        g_out_w, g_out_h, refresh_mhz);
     if (version >= 2) wl_output_send_scale(r, g_scale);
     if (version >= 4) {
         wl_output_send_name(r, "SFWM-1");

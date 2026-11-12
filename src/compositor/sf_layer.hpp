@@ -28,6 +28,8 @@ typedef void (*Fn_Tx_ctor)(void *tx);
 typedef void (*Fn_Tx_setGeometry)(void *tx, const void *sp_sc, const Rect *src, const Rect *dst, int32_t orient);
 typedef void (*Fn_Tx_setPosition)(void *tx, const void *sp_sc, float x, float y);
 typedef void (*Fn_Tx_setLayer)(void *tx, const void *sp_sc, int32_t z);
+typedef void (*Fn_Tx_setFrameRate)(void *tx, const void *sp_sc, float rate, int8_t compat, int8_t change);
+typedef void (*Fn_Tx_setFrameRateStrategy)(void *tx, const void *sp_sc, int8_t strategy);
 typedef void (*Fn_Tx_setAlpha)(void *tx, const void *sp_sc, float a);
 typedef void (*Fn_Tx_show)(void *tx, const void *sp_sc);
 typedef void (*Fn_Tx_hide)(void *tx, const void *sp_sc);
@@ -117,6 +119,8 @@ struct Lib {
     Fn_Tx_setGeometry       tx_setGeometry = nullptr;
     Fn_Tx_setPosition       tx_setPosition = nullptr;
     Fn_Tx_setLayer          tx_setLayer = nullptr;
+    Fn_Tx_setFrameRate      tx_setFrameRate = nullptr;
+    Fn_Tx_setFrameRateStrategy tx_setFrameRateStrategy = nullptr;
     Fn_Tx_setAlpha          tx_setAlpha = nullptr;
     Fn_Tx_show              tx_show = nullptr;
     Fn_Tx_hide              tx_hide = nullptr;
@@ -153,6 +157,10 @@ struct Lib {
         tx_setGeometry = (Fn_Tx_setGeometry)sym(libgui, "_ZN7android21SurfaceComposerClient11Transaction11setGeometryERKNS_2spINS_14SurfaceControlEEERKNS_4RectES9_i", true);
         tx_setPosition = (Fn_Tx_setPosition)sym(libgui, "_ZN7android21SurfaceComposerClient11Transaction11setPositionERKNS_2spINS_14SurfaceControlEEEff", true);
         tx_setLayer    = (Fn_Tx_setLayer)   sym(libgui, "_ZN7android21SurfaceComposerClient11Transaction8setLayerERKNS_2spINS_14SurfaceControlEEEi", true);
+        // Without a frame rate the layer is composited at the 60 Hz default and the
+        // BufferQueue only returns a buffer every 16.6 ms, capping every client there.
+        tx_setFrameRate = (Fn_Tx_setFrameRate)sym(libgui, "_ZN7android21SurfaceComposerClient11Transaction12setFrameRateERKNS_2spINS_14SurfaceControlEEEfaa", false);
+        tx_setFrameRateStrategy = (Fn_Tx_setFrameRateStrategy)sym(libgui, "_ZN7android21SurfaceComposerClient11Transaction29setFrameRateSelectionStrategyERKNS_2spINS_14SurfaceControlEEEa", false);
         tx_setAlpha    = (Fn_Tx_setAlpha)   sym(libgui, "_ZN7android21SurfaceComposerClient11Transaction8setAlphaERKNS_2spINS_14SurfaceControlEEEf", false);
         tx_show        = (Fn_Tx_show)       sym(libgui, "_ZN7android21SurfaceComposerClient11Transaction4showERKNS_2spINS_14SurfaceControlEEE", true);
         tx_hide        = (Fn_Tx_hide)       sym(libgui, "_ZN7android21SurfaceComposerClient11Transaction4hideERKNS_2spINS_14SurfaceControlEEE", true);
@@ -202,6 +210,57 @@ static inline void end_batch() {
     L.tx_apply(L.txOnce(), false, false);   // one transaction, applied atomically
 }
 
+// ANativeWindow has no public swap-interval call, so the private struct is used the same
+// way PojavLauncher and FCL do it. Interval 0 puts the BufferQueue in asynchronous mode:
+// dequeueBuffer stops blocking on vsync, which otherwise caps a compositor at the panel
+// refresh rate no matter how fast it could composite. Only the magic is validated: newer
+// Android releases append fields, so sizeof() no longer matches while the setSwapInterval
+// offset, which sits before everything ever added, stays valid.
+static inline bool window_set_swap_interval(ANativeWindow *w, int interval) {
+    struct NativeBase {
+        int magic, version;
+        void *reserved[4];
+        void (*incRef)(NativeBase *);
+        void (*decRef)(NativeBase *);
+    };
+    struct WindowReal {
+        NativeBase common;
+        uint32_t flags;
+        int minSwapInterval, maxSwapInterval;
+        float xdpi, ydpi;
+        intptr_t oem[4];
+        int (*setSwapInterval)(ANativeWindow *, int);
+    };
+    static const int kWindowMagic = 0x5f776e64;   // '_wnd'
+    if (!w) return false;
+    WindowReal *r = reinterpret_cast<WindowReal *>(w);
+    if (r->common.magic != kWindowMagic) {
+        fprintf(stderr, "[sf] window magic 0x%x is not '_wnd', leaving swap interval alone\n",
+                r->common.magic);
+        return false;
+    }
+    if (!r->setSwapInterval) return false;
+    const int e = r->setSwapInterval(w, interval);
+    if (e != 0) {
+        fprintf(stderr, "[sf] setSwapInterval(%d) failed: %d\n", interval, e);
+        return false;
+    }
+    return true;
+}
+
+// Frame rate to request for our layers. SurfaceFlinger picks 60 Hz for a layer that never
+// states one, and then the BufferQueue only hands buffers back every 16.6 ms, so no
+// amount of compositor optimisation can go faster. SFWM_FPS overrides it.
+static inline float layer_frame_rate() {
+    static float r = -1.f;
+    if (r < 0.f) {
+        const char *e = getenv("SFWM_FPS");
+        const int fps = e ? atoi(e) : 0;
+        r = fps > 0 ? (float)fps : 120.f;
+    }
+    return r;
+}
+
 class Layer {
 public:
     void *sc = nullptr;        // SurfaceControl*
@@ -209,6 +268,7 @@ public:
     ANativeWindow *win = nullptr;
     int32_t w = 0, h = 0;
     int32_t cap_w = 0, cap_h = 0;      // allocated buffer size, at least the visible size
+    bool frame_rate_set = false;
 
     // format uses HAL_PIXEL_FORMAT_*: 1 = RGBA_8888 (R,G,B,A in memory),
     // 5 = BGRA_8888 (B,G,R,A). Client dmabufs and shm buffers are mostly ARGB8888,
@@ -235,6 +295,11 @@ public:
         get_surface_bridge(sc, reinterpret_cast<void *>(L.getSurface), &surface);
         if (!surface) { fprintf(stderr, "[sf] getSurface failed\n"); return false; }
         win = (ANativeWindow *)((char *)surface + 0x10);   // the ANativeWindow subobject is at +0x10
+        // Asynchronous mode is what uncaps a launcher, but here SurfaceFlinger does not
+        // always keep consuming when the producer stops waiting for vsync: the second
+        // dequeueBuffer then blocks forever. Opt-in only.
+        const char *async = getenv("SFWM_ASYNC");
+        if (async && async[0] == '1') window_set_swap_interval(win, 0);
         return true;
     }
 
@@ -247,6 +312,20 @@ public:
         void *sp_sc[1] = { sc };
         void *tx = L.txOnce();
         if (L.tx_setLayer) L.tx_setLayer(tx, sp_sc, z);
+        if (!frame_rate_set) {
+            if (L.tx_setFrameRate) {
+                // compatibility 1 = FIXED_SOURCE: "this exact rate", instead of 0 = DEFAULT,
+                // which Android maps to a frame-rate category (HIGH is only 90 Hz here).
+                L.tx_setFrameRate(tx, sp_sc, layer_frame_rate(), 1, 0);
+                // SurfaceFlinger picks the display mode from the votes of the visible
+                // layers; without a strategy the request stays advisory.
+                if (L.tx_setFrameRateStrategy) L.tx_setFrameRateStrategy(tx, sp_sc, 1 /*Override*/);
+                printf("[sf] layer frame rate -> %.1f Hz\n", layer_frame_rate());
+            } else {
+                fprintf(stderr, "[sf] setFrameRate symbol not found, display stays at the default rate\n");
+            }
+            frame_rate_set = true;
+        }
         if (L.tx_setPosition) L.tx_setPosition(tx, sp_sc, (float)x, (float)y);
         if (L.tx_show) L.tx_show(tx, sp_sc);
         if (!L.defer) L.tx_apply(tx, false, false);

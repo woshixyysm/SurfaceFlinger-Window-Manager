@@ -310,12 +310,19 @@ static const struct zxdg_toplevel_decoration_v1_interface deco_impl = {
     .unset_mode = deco_unset_mode,
 };
 static void deco_mgr_destroy(wl_client *, wl_resource *r) { wl_resource_destroy(r); }
-static void deco_mgr_get(wl_client *c, wl_resource *res, uint32_t id, wl_resource *) {
+static void deco_mgr_get(wl_client *c, wl_resource *res, uint32_t id, wl_resource *top) {
     wl_resource *o = wl_resource_create(c, &zxdg_toplevel_decoration_v1_interface,
                                         wl_resource_get_version(res), id);
     if (!o) { wl_client_post_no_memory(c); return; }
     wl_resource_set_implementation(o, &deco_impl, nullptr, nullptr);
     deco_send_mode(o);
+
+    // The toplevel's first configure is sent from get_toplevel, which happens before the
+    // client can ask for a decoration. GLFW only allows a Wayland window to be mapped once
+    // a configure arrived with the decoration mode known (wl_window.c, xdgSurfaceHandleConfigure),
+    // so without a second configure such a window stays hidden and never commits a buffer.
+    View *v = top ? (View *)wl_resource_get_user_data(top) : nullptr;
+    if (v && v->toplevel && v->xdg_surface) toplevel_send_configure(v);
 }
 static const struct zxdg_decoration_manager_v1_interface deco_mgr_impl = {
     .destroy = deco_mgr_destroy,

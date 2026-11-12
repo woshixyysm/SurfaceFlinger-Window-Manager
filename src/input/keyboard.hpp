@@ -464,12 +464,17 @@ static void kb_key(uint32_t code, bool pressed) {
     if (app) {
         // Keys for an Android window go through the shell, not through this socket: the
         // window that receives them is the host task, and it hands them to its display.
+        // SFWM_KB_FORCE=1 skips that and always injects into the focused Wayland client,
+        // which is what you want when the compositor is driven from a script.
+        static const bool kb_force = getenv("SFWM_KB_FORCE") != nullptr;
         static bool once = false;
         if (!once) {
             once = true;
-            printf("[kbd] '%s' has the focus; the shell delivers its keys\n", app->pkg);
+            printf("[kbd] '%s' has the focus; the shell delivers its keys%s\n", app->pkg,
+                   kb_force ? " (forced to the Wayland client)" : "");
         }
-        return;
+        if (!kb_force) return;
+        if (!g_srv.kb_focus) kb_set_focus(front_view());
     }
     uint32_t serial = wl_display_next_serial(g_srv.dpy);
     uint32_t t = now_ms();
