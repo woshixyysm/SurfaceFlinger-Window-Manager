@@ -1,30 +1,30 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // surfaceflinger wrapper for the optional sfwm-sfhook module.
 //
-// It sets LD_PRELOAD and execs the real binary, which customize.sh copied to the module
-// directory at install time (at that point /system/bin/surfaceflinger is still the stock
-// one, because module overlays are only mounted at boot).
+// Everything it needs lives under /system: the module mounts the stock binary here as
+// surfaceflinger.real and the helper as /system/lib64/libsfwmsfhook.so. That matters,
+// because surfaceflinger runs in its own SELinux domain and cannot exec or read files under
+// /data/adb at all - a first attempt that kept the stock binary there left the system
+// waiting for SurfaceFlingerAIDL forever.
 //
-// If anything is missing it execs the stock binary anyway: losing the hook is fine, losing
+// If the helper is missing it still execs the real binary: losing the hook is fine, losing
 // SurfaceFlinger is not.
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
-#define REAL "/data/adb/modules/sfwm-sfhook/surfaceflinger.real"
-#define HOOK "/data/adb/modules/sfwm-sfhook/lib/libsfwmsfhook.so"
+#define REAL "/system/bin/surfaceflinger.real"
+#define HOOK "/system/lib64/libsfwmsfhook.so"
 
 int main(int argc, char **argv)
 {
     (void)argc;
-    if (access(REAL, X_OK) == 0) {
-        if (access(HOOK, R_OK) == 0) {
-            setenv("LD_PRELOAD", HOOK, 1);
-            setenv("SFWM_SF_HOOK", "1", 1);
-        }
-        execv(REAL, argv);
+    if (access(HOOK, R_OK) == 0) {
+        setenv("LD_PRELOAD", HOOK, 1);
+        setenv("SFWM_SF_HOOK", "1", 1);
     }
-    // Fall back to whatever /system/bin/surfaceflinger resolves to without us.
-    execv("/system/bin/surfaceflinger.orig", argv);
+    execv(REAL, argv);
+    fprintf(stderr, "sfwm wrapper: cannot exec %s\n", REAL);
     return 127;
 }

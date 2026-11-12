@@ -25,19 +25,23 @@ AHardwareBuffer_createFromHandle(IMPORT) -> -22 (needs the mapper)
 `service list` shows only `android.hardware.graphics.allocator.IAllocator/default`; there is
 no mapper service. SurfaceFlinger uses the **passthrough** HAL module
 `/vendor/lib64/hw/android.hardware.graphics.mapper@4.0-impl-qti-display.so` inside its own
-process, which is why the import only works there.
+process, which is why the import only works there. (It does work there — see Status.)
 
 ## What it does
 
 A wrapper replaces `/system/bin/surfaceflinger`, sets `LD_PRELOAD` and execs the stock binary
 saved at install time. The preloaded library starts one tiny detached thread that listens on
-`/data/adb/sfwm-sf/sf.sock` and does exactly one thing:
+the **abstract** socket `@sfwm-sf` and does exactly one thing:
 
 ```
 request : magic,width,height,fourcc,stride  + one SCM_RIGHTS fd   (the client dma-buf)
 response: status, then (on success) an AHardwareBuffer sent with
           AHardwareBuffer_sendHandleToUnixSocket()
 ```
+
+An abstract socket is used because `/data/adb` is `0700 root` and SurfaceFlinger runs as
+uid 1000, so a filesystem socket is not reachable no matter what the SELinux labels say.
+The helper additionally checks `SO_PEERCRED` and only answers uid 0 and the Termux uid.
 
 sfwm reads it back with `AHardwareBuffer_recvHandleFromUnixSocket()`, which uses CLONE and
 needs no mapper, and sets that buffer on its own layer with
@@ -59,19 +63,37 @@ SurfaceFlinger. That is why the module is off by default and marked optional.
 
 ## Status
 
-The module and the helper build and install; the round trip has **not** been proven to fix
-the EINVAL yet, because that depends on whether the vendor mapper accepts a dma-buf that did
-not come from its own allocator even when the call is made inside SurfaceFlinger. Test with:
+**The import works, and presentation is now a pure scanout of the client's own dma-buf.**
+`sfwm` logs `[direct] sf-hook import ok, scanout without compositing` and the GPU blit is
+skipped entirely.
 
-```sh
-# in sfwm, enable the client
-SFWM_SF_HOOK=1 ./sfwm ...
-# the log should show  [direct] sf-hook import ok  instead of the EINVAL fallback
-```
+Getting there took a disassembly round. The verdict of `AHardwareBuffer_createFromHandle()`
+was misleading, so the call chain was read instruction by instruction:
 
-If the import still fails inside SurfaceFlinger, the conclusion is that Android's glalloc
-simply does not allow wrapping a foreign dma-buf, and only a client that renders into a
-gralloc buffer (the way a launcher does) can avoid the extra pass.
+| where | what it does | returns |
+| --- | --- | --- |
+| `libnativewindow.so AHardwareBuffer_createFromHandle+0x34` | `desc.rfu0 != 0 \|\| desc.rfu1 != 0` | `-EINVAL` |
+| `libui.so GraphicBuffer::initWithHandle+0x98` | `GraphicBufferMapper::importBuffer()` → mapper HAL | `-EINVAL` |
+| `…mapper@4.0-impl-qti-display.so QtiMapper::validateBufferSize+0x134` | `BufferManager::ValidateBufferSize(handle, info)` | `BAD_VALUE` → `-EINVAL` |
+
+`logcat` narrowed it down (`Gralloc5: Format didn't match, expected 5 got UNSPECIFIED`),
+so the failure was never "this dma-buf is foreign". Two real bugs in the helper caused it:
+
+1. the placeholder buffer was allocated with `usage = COMPOSER_OVERLAY` while the import
+   descriptor said `usage = CPU_READ | COMPOSER_OVERLAY`, so `validateBufferSize` compared
+   two different usages;
+2. **all** `numFds` descriptors of the handle were replaced with the client's dma-buf. The
+   vendor handle has two fds; the second one carries gralloc's own metadata, and the mapper
+   reads the pixel format from it. Overwriting it made the format read back as
+   `UNSPECIFIED (0)`. Only descriptor 0 is the pixels.
+
+With both fixed, `IMPORT` succeeds inside SurfaceFlinger: the vendor mapper does accept a
+dma-buf produced by mesa, as long as geometry, format and usage in the descriptor match what
+the placeholder advertised.
+
+Known limitation: this path makes the sfwm layer show **one** client, because the layer now
+carries that client's buffer instead of a composited frame. It suits the
+single-fullscreen-window case (Minecraft); leave `SFWM_SF_HOOK` unset for multi-window use.
 
 ## Layout
 

@@ -31,7 +31,7 @@ if (-not (Test-Path $clang)) {
 if (-not (Test-Path $clang)) { throw "clang for API $Api not found under $Ndk" }
 
 $out = Join-Path $here "build"
-$lib = Join-Path $here "lib"
+$lib = Join-Path $here "system/lib64"
 $bin = Join-Path $here "system/bin"
 New-Item -ItemType Directory -Force -Path $out, $lib, $bin | Out-Null
 
@@ -62,8 +62,10 @@ Copy-Item (Join-Path $here "module.prop") $stage
 Copy-Item (Join-Path $here "customize.sh") $stage
 Copy-Item (Join-Path $here "sepolicy.rule") $stage
 Copy-Item (Join-Path $here "hot.sh") $stage
+Copy-Item (Join-Path $here "post-fs-data.sh") $stage
 Copy-Item (Join-Path $here "README.md") $stage -ErrorAction SilentlyContinue
-Copy-Item -Recurse (Join-Path $here "lib") (Join-Path $stage "lib")
+# The helper is mounted at /system/lib64 so the surfaceflinger domain may map it; nothing the
+# hook needs lives under /data, which that domain cannot reach.
 Copy-Item -Recurse (Join-Path $here "system") (Join-Path $stage "system")
 
 $zip = Join-Path $out "sfwm-sfhook.zip"

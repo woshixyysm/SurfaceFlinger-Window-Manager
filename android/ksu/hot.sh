@@ -14,7 +14,7 @@ MODDIR=/data/adb/modules/sfwm-sfhook
 RUNDIR=/data/adb/sfwm-sf
 SOCK=$RUNDIR/sf.sock
 
-SO_SRC=${SO_SRC:-$MODDIR/lib/libsfwmsfhook.so}
+SO_SRC=${SO_SRC:-$MODDIR/system/lib64/libsfwmsfhook.so}
 SO_DST=/data/adb/sfwm-sf/libsfwmsfhook.so
 INJECT=${INJECT:-/data/local/tmp/sfinject}
 

@@ -30,7 +30,7 @@ panel resolution.
 | `SFWM_ZC` | on | `0` disables zero-copy output and reads the composite back with `glReadPixels` |
 | `SFWM_FPS` | `120` | frame callback cadence; `0` sends them immediately (uncapped clients) |
 | `SFWM_ASYNC` | unset | `1` puts the layer surface in async mode via the private swap-interval hook |
-| `SFWM_SF_HOOK` | unset | `1` asks the optional KSU helper inside SurfaceFlinger to import the client dma-buf (see [android/ksu](../android/ksu/README.md)); falls back to the blit path when absent |
+| `SFWM_SF_HOOK` | unset | `1` has the optional KSU helper inside SurfaceFlinger import the client dma-buf, so the layer is a pure scanout of the client's buffer with no composite at all (see [android/ksu](../android/ksu/README.md)); unset it for multi-window use, and it falls back to the blit path whenever the helper is absent |
 | `SFWM_GL_FLIP` | auto | vertical flip for the GPU path, when an imported buffer arrives inverted |
 | `SFWM_GLDBG` | unset | log buffer geometry changes on the GPU path |
 | `SFWM_TESTPAT` | `0` | draw the self-test pattern over every frame |

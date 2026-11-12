@@ -70,6 +70,12 @@ typedef void (*PFN_ascRelease)(ASurfaceControl *);
 typedef ASurfaceTransaction *(*PFN_txCreate)(void);
 typedef void (*PFN_txSetBuffer)(ASurfaceTransaction *, ASurfaceControl *, const AHardwareBuffer *,
                                 int32_t);
+// android/rect.h's ARect, declared here so this header needs no extra include.
+struct TxRect {
+    int32_t left, top, right, bottom;
+};
+typedef void (*PFN_txSetGeometry)(ASurfaceTransaction *, ASurfaceControl *, const TxRect &,
+                                  const TxRect &, int32_t);
 typedef void (*PFN_txApply)(ASurfaceTransaction *);
 typedef void (*PFN_txDelete)(ASurfaceTransaction *);
 typedef void *(*PFN_nhCreate)(int, int);
@@ -86,6 +92,7 @@ struct Api {
     PFN_ascRelease ascRelease = nullptr;
     PFN_txCreate txCreate = nullptr;
     PFN_txSetBuffer txSetBuffer = nullptr;
+    PFN_txSetGeometry txSetGeometry = nullptr;
     PFN_txApply txApply = nullptr;
     PFN_txDelete txDelete = nullptr;
     PFN_nhCreate nhCreate = nullptr;
@@ -113,6 +120,7 @@ inline Api &api() {
     a.ascRelease = (PFN_ascRelease)dlsym(an, "ASurfaceControl_release");
     a.txCreate = (PFN_txCreate)dlsym(an, "ASurfaceTransaction_create");
     a.txSetBuffer = (PFN_txSetBuffer)dlsym(an, "ASurfaceTransaction_setBuffer");
+    a.txSetGeometry = (PFN_txSetGeometry)dlsym(an, "ASurfaceTransaction_setGeometry");
     a.txApply = (PFN_txApply)dlsym(an, "ASurfaceTransaction_apply");
     a.txDelete = (PFN_txDelete)dlsym(an, "ASurfaceTransaction_delete");
     // native_handle_create lives in libcutils, which is not always reachable from here; the
@@ -454,24 +462,31 @@ inline bool present_via_sfhook(ANativeWindow *win, const DmabufBuf *db) {
     static int sock = -2;
     static int failures = 0;
     if (sock == -2) {
+        // Abstract namespace by default: /data/adb is 0700 root, so a file socket is not
+        // reachable for surfaceflinger's uid. SFWM_SF_HOOK_SOCK still allows a path socket.
         const char *path = getenv("SFWM_SF_HOOK_SOCK");
-        if (!path) path = "/data/adb/sfwm-sf/sf.sock";
+        const char *name = "sfwm-sf";
         int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        struct sockaddr_un addr;
+        socklen_t len;
+        memset(&addr, 0, sizeof addr);
+        addr.sun_family = AF_UNIX;
+        if (path) {
+            strncpy(addr.sun_path, path, sizeof addr.sun_path - 1);
+            len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + strlen(addr.sun_path) + 1);
+        } else {
+            memcpy(addr.sun_path + 1, name, strlen(name));
+            len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + strlen(name));
+        }
         if (s < 0) {
             sock = -1;
+        } else if (connect(s, (struct sockaddr *)&addr, len) != 0) {
+            close(s);
+            sock = -1;
+            printf("[direct] sf-hook socket not available, using the blit path\n");
         } else {
-            struct sockaddr_un addr;
-            memset(&addr, 0, sizeof addr);
-            addr.sun_family = AF_UNIX;
-            strncpy(addr.sun_path, path, sizeof addr.sun_path - 1);
-            if (connect(s, (struct sockaddr *)&addr, sizeof addr) != 0) {
-                close(s);
-                sock = -1;
-                printf("[direct] sf-hook socket not available (%s), using the blit path\n", path);
-            } else {
-                sock = s;
-                printf("[direct] sf-hook connected: %s\n", path);
-            }
+            sock = s;
+            printf("[direct] sf-hook connected\n");
         }
     }
     if (sock < 0) return false;
@@ -504,8 +519,23 @@ inline bool present_via_sfhook(ANativeWindow *win, const DmabufBuf *db) {
     int32_t status = -1;
     ssize_t n = recv(sock, &status, sizeof status, MSG_WAITALL);
     if (n != (ssize_t)sizeof status || status != 0) {
-        if (failures++ < 3)
-            printf("[direct] sf-hook import rejected (%d), using the blit path\n", status);
+        int32_t diag[2] = {0, 0};
+        if (n == (ssize_t)sizeof status && recv(sock, diag, sizeof diag, MSG_WAITALL) > 0 &&
+            failures++ < 3) {
+            printf("[direct] sf-hook stage=%d code=%d (blit path)\n", diag[0], diag[1]);
+            int32_t ni = 0;
+            if (recv(sock, &ni, sizeof ni, MSG_WAITALL) == (ssize_t)sizeof ni && ni > 0 && ni <= 40) {
+                int32_t buf[40];
+                if (recv(sock, buf, sizeof(int32_t) * (size_t)ni, MSG_WAITALL) ==
+                    (ssize_t)(sizeof(int32_t) * (size_t)ni)) {
+                    printf("[direct] template ints:");
+                    for (int i = 0; i < ni; i++) printf(" [%d]=0x%x", i, buf[i]);
+                    printf("\n");
+                }
+            }
+        } else {
+            failures++;
+        }
         return false;
     }
     AHardwareBuffer *hb = nullptr;
@@ -526,6 +556,23 @@ inline bool present_via_sfhook(ANativeWindow *win, const DmabufBuf *db) {
         return false;
     }
     a.txSetBuffer(tx, asc, hb, -1);
+    // The layer now carries the client's own buffer instead of a composited one, so the
+    // geometry has to scale it up to the layer; without it SurfaceFlinger shows it 1:1 in
+    // the corner and leaves the rest of the screen untouched.
+    if (a.txSetGeometry) {
+        static int sw = 0, sh = 0;
+        if (sw <= 0) {
+            typedef int32_t (*Fn_getW)(ANativeWindow *);
+            typedef int32_t (*Fn_getH)(ANativeWindow *);
+            static Fn_getW p_w = (Fn_getW)dlsym(RTLD_DEFAULT, "ANativeWindow_getWidth");
+            static Fn_getH p_h = (Fn_getH)dlsym(RTLD_DEFAULT, "ANativeWindow_getHeight");
+            sw = p_w ? p_w(win) : 0;
+            sh = p_h ? p_h(win) : 0;
+        }
+        const TxRect src{0, 0, db->w, db->h};
+        const TxRect dst{0, 0, sw > 0 ? sw : db->w, sh > 0 ? sh : db->h};
+        a.txSetGeometry(tx, asc, src, dst, 0);
+    }
     a.txApply(tx);
     a.txDelete(tx);
     a.hbRelease(hb);

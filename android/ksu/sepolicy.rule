@@ -1,19 +1,44 @@
 # SELinux rules for the optional sfwm-sfhook module.
 #
-# surfaceflinger has to be able to read the module directory to load the helper, and to
-# talk to the socket its own thread created. Everything else stays untouched.
-#
-# KernelSU applies this file automatically when the module is enabled. If your kernel does
-# not support sepolicy.rule, the module simply will not load the helper and sfwm keeps
-# working the way it did.
+# Two things have to be granted and nothing more: surfaceflinger must be able to run the
+# stock binary the module mounts next to the wrapper and map the helper, and it needs its
+# control socket. Which label those files carry after mounting depends on how the module
+# manager relabels them, so both possibilities are covered; every rule is scoped to the
+# surfaceflinger domain only.
 
-allow surfaceflinger system_data_file dir { search open read getattr }
-allow surfaceflinger system_data_file file { read open getattr map execute execute_no_trans }
-allow surfaceflinger system_data_file sock_file { read write open create unlink getattr }
+# Stock binary mounted as /system/bin/surfaceflinger.real, helper as
+# /system/lib64/libsfwmsfhook.so.
+allow surfaceflinger system_file file { read open execute execute_no_trans getattr map };
+allow surfaceflinger system_lib_file file { read open execute getattr map };
+allow surfaceflinger system_data_file file { read open execute execute_no_trans getattr map };
+allow surfaceflinger system_data_file dir { search open read getattr };
 
-# Hot loading while developing: android/ksu/hot.sh injects the helper into the running
-# surfaceflinger with ptrace instead of waiting for a reboot. Only the root shell domain may
-# do this, and it is otherwise harmless: the library only answers one socket request.
+# If the module manager leaves the files with the data label of the module directory.
+allow surfaceflinger adb_data_file file { read open execute execute_no_trans getattr map };
+allow surfaceflinger adb_data_file dir { search open read getattr };
+
+# The control socket the helper creates. Creating it needs write access to the directory
+# itself (add_name), not just to the socket inode.
+allow surfaceflinger system_data_file dir { write add_name remove_name };
+allow surfaceflinger system_data_file sock_file { read write open create unlink getattr setattr };
+
+# sfwm connects from a root shell (KernelSU domain by default, untrusted_app when run
+# straight from Termux) and the two processes pass buffer fds over the socket.
+allow ksu system_data_file sock_file { read write open getattr };
+allow ksu system_data_file unix_stream_socket connectto;
+allow ksu surfaceflinger fd use;
+allow surfaceflinger ksu fd use;
+allow surfaceflinger ksu unix_stream_socket { read write };
+allow ksu surfaceflinger unix_stream_socket { read write };
+
+# Termux runs sfwm as an ordinary app uid; the helper additionally checks SO_PEERCRED, so
+# only uid 0 and the Termux uid get an answer even though the rule is domain-wide.
+allow untrusted_app surfaceflinger unix_stream_socket { connectto read write };
+allow untrusted_app surfaceflinger fd use;
+allow surfaceflinger untrusted_app fd use;
+
+# Hot loading while developing: android/ksu/hot.sh injects the same helper into the running
+# surfaceflinger instead of waiting for a reboot. Only the root shell domain may do this.
 allow ksu surfaceflinger process ptrace;
 allow ksu surfaceflinger process { signal sigchld };
 
