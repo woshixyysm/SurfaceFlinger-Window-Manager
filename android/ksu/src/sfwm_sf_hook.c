@@ -85,6 +85,21 @@ struct request {
     uint32_t stride;
 };
 
+// 'SFWP': allocate a pool of buffers inside SurfaceFlinger and hand them to the client,
+// instead of the client handing a foreign dma-buf in. Everything stays an allocation the
+// mapper made itself, so nothing has to be validated on the way back in, and the client can
+// reuse the same few buffers for every frame.
+#define SFWM_SF_MAGIC_ALLOC 0x53465750u
+#define SFWM_SF_MAX_POOL 4
+
+struct alloc_request {
+    uint32_t magic;
+    uint32_t width;
+    uint32_t height;
+    uint32_t format;
+    uint32_t count;
+};
+
 // Copy FreeDesktop DRM fourcc to HAL_PIXEL_FORMAT_*. Kept local so the helper has no
 // dependency beyond libc and libnativewindow.
 static uint32_t hal_format_from_fourcc(uint32_t fourcc)
@@ -101,7 +116,9 @@ static uint32_t hal_format_from_fourcc(uint32_t fourcc)
     }
 }
 
-static int recv_fd(int sock, void *buf, size_t len)
+// Receives one request. Reports the attached fd through `out_fd` (-1 when the request
+// carries none) and only fails when the message itself could not be read.
+static int recv_req(int sock, void *buf, size_t len, int *out_fd)
 {
     struct iovec iov = {.iov_base = buf, .iov_len = len};
     char ctl[CMSG_SPACE(sizeof(int))];
@@ -113,11 +130,63 @@ static int recv_fd(int sock, void *buf, size_t len)
     msg.msg_controllen = sizeof ctl;
     const ssize_t n = recvmsg(sock, &msg, 0);
     if (n != (ssize_t)len) return -1;
+    *out_fd = -1;
     for (struct cmsghdr *c = CMSG_FIRSTHDR(&msg); c; c = CMSG_NXTHDR(&msg, c)) {
-        if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_RIGHTS)
-            return *(int *)CMSG_DATA(c);
+        if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_RIGHTS) {
+            *out_fd = *(int *)CMSG_DATA(c);
+            break;
+        }
     }
-    return -1;
+    return 0;
+}
+
+static int recv_fd(int sock, void *buf, size_t len)
+{
+    int fd = -1;
+    if (recv_req(sock, buf, len, &fd) != 0) return -1;
+    return fd;
+}
+
+// Allocates the pool the client is going to render into and sends each buffer back. The
+// helper keeps no reference: the handles the client receives are its own.
+static int32_t serve_alloc(int sock, const struct alloc_request *r)
+{
+    int32_t status = 0;
+    AHardwareBuffer *pool[SFWM_SF_MAX_POOL] = {0};
+    int n = 0;
+
+    if (r->count == 0 || r->count > SFWM_SF_MAX_POOL || r->width == 0 || r->height == 0) {
+        status = -EINVAL;
+    } else {
+        uint32_t hal = hal_format_from_fourcc(r->format);
+        if (!hal) hal = r->format;
+        struct ahb_desc d;
+        memset(&d, 0, sizeof d);
+        d.width = r->width;
+        d.height = r->height;
+        d.layers = 1;
+        d.format = hal;
+        // GPU_FRAMEBUFFER is what makes this renderable by us; COMPOSER_OVERLAY is what makes
+        // it acceptable to SurfaceFlinger. Without the former the GPU silently draws nowhere
+        // and the layer stays black while every frame is "presented".
+        d.usage = 0x300ULL | AHB_USAGE_COMPOSER_OVERLAY;
+        for (; n < (int)r->count; n++) {
+            if (p_alloc(&d, &pool[n]) != 0 || !pool[n]) {
+                status = -ENOMEM;
+                break;
+            }
+        }
+        if (status == 0) n = (int)r->count;
+    }
+
+    if (send(sock, &status, sizeof status, MSG_NOSIGNAL) != (ssize_t)sizeof status) status = -1;
+    if (status == 0) {
+        for (int i = 0; i < n; i++)
+            if (p_send && p_send(pool[i], sock) != 0) break;
+    }
+    for (int i = 0; i < n; i++)
+        if (pool[i]) p_release(pool[i]);
+    return status;
 }
 
 // Why the last import failed. Logging from SurfaceFlinger turned out to be unreliable, so
@@ -247,7 +316,9 @@ static int32_t import_dmabuf(uint32_t width, uint32_t height, uint32_t hal_forma
     return 0;
 }
 
-static void serve_client(int sock)
+// Serves requests on one accepted connection until the peer goes away. Returns 0 to keep
+// the connection open; the caller closes it.
+static int serve_client(int sock)
 {
     // The SELinux rule for the app domain is domain-wide, so gate on the peer uid too:
     // only root and the Termux user are allowed to ask for an import.
@@ -256,19 +327,22 @@ static void serve_client(int sock)
     if (getsockopt(sock, SOL_SOCKET, SO_PEERCRED, &cred, &clen) == 0 && cred.uid != 0 &&
         cred.uid != SFWM_SF_ALLOWED_UID) {
         LOGI("peer uid %d rejected", (int)cred.uid);
-        return;
+        return -1;
     }
     struct request req;
     int fd = -1;
     AHardwareBuffer *buffer = NULL;
     int32_t status;
 
+    if (recv_req(sock, &req, sizeof req, &fd) != 0) return -1;
+    if (req.magic == SFWM_SF_MAGIC_ALLOC) {
+        // Same message size as `request`; the fifth word is the count instead of the stride.
+        struct alloc_request ar;
+        memcpy(&ar, &req, sizeof ar);
+        serve_alloc(sock, &ar);
+        return 0;
+    }
     do {
-        fd = recv_fd(sock, &req, sizeof req);
-        if (fd < 0) {
-            status = -EBADF;
-            break;
-        }
         if (req.magic != SFWM_SF_MAGIC) {
             status = -EINVAL;
             break;
@@ -285,7 +359,7 @@ static void serve_client(int sock)
     if (send(sock, &status, sizeof status, MSG_NOSIGNAL) != (ssize_t)sizeof status) {
         if (buffer) p_release(buffer);
         if (fd >= 0) close(fd);
-        return;
+        return -1;
     }
     if (status != 0) {
         // Tell the client which step failed; the log channel inside SurfaceFlinger is not
@@ -300,6 +374,7 @@ static void serve_client(int sock)
     }
     if (buffer) p_release(buffer);
     if (fd >= 0) close(fd);
+    return 0;
 }
 
 // Fills addr with the abstract socket address; returns the length to pass to bind/connect.
@@ -340,7 +415,9 @@ static void *serve(void *unused)
             usleep(50000);
             continue;
         }
-        serve_client(c);
+        for (;;) {
+            if (serve_client(c) != 0) break;
+        }
         close(c);
     }
     return NULL;

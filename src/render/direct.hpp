@@ -76,6 +76,9 @@ struct TxRect {
 };
 typedef void (*PFN_txSetGeometry)(ASurfaceTransaction *, ASurfaceControl *, const TxRect &,
                                   const TxRect &, int32_t);
+typedef void (*PFN_txSetFrameRate)(ASurfaceTransaction *, ASurfaceControl *, float, int8_t);
+typedef void (*PFN_txSetTransparency)(ASurfaceTransaction *, ASurfaceControl *, int8_t);
+typedef void (*PFN_txSetAlpha)(ASurfaceTransaction *, ASurfaceControl *, float);
 typedef void (*PFN_txApply)(ASurfaceTransaction *);
 typedef void (*PFN_txDelete)(ASurfaceTransaction *);
 typedef void *(*PFN_nhCreate)(int, int);
@@ -93,6 +96,9 @@ struct Api {
     PFN_txCreate txCreate = nullptr;
     PFN_txSetBuffer txSetBuffer = nullptr;
     PFN_txSetGeometry txSetGeometry = nullptr;
+    PFN_txSetFrameRate txSetFrameRate = nullptr;
+    PFN_txSetTransparency txSetTransparency = nullptr;
+    PFN_txSetAlpha txSetAlpha = nullptr;
     PFN_txApply txApply = nullptr;
     PFN_txDelete txDelete = nullptr;
     PFN_nhCreate nhCreate = nullptr;
@@ -121,6 +127,9 @@ inline Api &api() {
     a.txCreate = (PFN_txCreate)dlsym(an, "ASurfaceTransaction_create");
     a.txSetBuffer = (PFN_txSetBuffer)dlsym(an, "ASurfaceTransaction_setBuffer");
     a.txSetGeometry = (PFN_txSetGeometry)dlsym(an, "ASurfaceTransaction_setGeometry");
+    a.txSetFrameRate = (PFN_txSetFrameRate)dlsym(an, "ASurfaceTransaction_setFrameRate");
+    a.txSetTransparency = (PFN_txSetTransparency)dlsym(an, "ASurfaceTransaction_setBufferTransparency");
+    a.txSetAlpha = (PFN_txSetAlpha)dlsym(an, "ASurfaceTransaction_setAlpha");
     a.txApply = (PFN_txApply)dlsym(an, "ASurfaceTransaction_apply");
     a.txDelete = (PFN_txDelete)dlsym(an, "ASurfaceTransaction_delete");
     // native_handle_create lives in libcutils, which is not always reachable from here; the
@@ -447,50 +456,211 @@ inline bool present_graft(ANativeWindow *win, const DmabufBuf *db) {
     return true;
 }
 
+// Puts `hb` on the layer and scales it to fill it. Split out so the cached path can reuse an
+// already imported buffer without touching the socket.
+inline bool present_attach(Api &a, ANativeWindow *win, const DmabufBuf *db, AHardwareBuffer *hb,
+                           int dst_w, int dst_h) {
+    static ASurfaceControl *asc = nullptr;
+    if (!asc) asc = a.ascFromWindow(win);
+    if (!asc) {
+        static int once = 0;
+        if (!once++) printf("[direct] attach: ASurfaceControl_createFromWindow failed\n");
+        return false;
+    }
+    ASurfaceTransaction *tx = a.txCreate();
+    if (!tx) {
+        static int once = 0;
+        if (!once++) printf("[direct] attach: transaction allocation failed\n");
+        return false;
+    }
+    a.txSetBuffer(tx, asc, hb, -1);
+    // SurfaceFlinger picks the display mode from the votes of the visible layers. The layer
+    // the legacy SurfaceComposerClient path votes on is not the one this transaction touches,
+    // and without a vote here the display falls back to 60 Hz whatever SFWM_FPS asked for.
+    if (a.txSetFrameRate) {
+        static float rate = -1.f;
+        if (rate < 0.f) {
+            const char *e = getenv("SFWM_FPS");
+            const int fps = e ? atoi(e) : 0;
+            rate = fps > 0 ? (float)fps : 120.f;
+        }
+        a.txSetFrameRate(tx, asc, rate, 1 /* EXACT */);
+    }
+    // The layer now carries the client's own buffer instead of a composited one, so the
+    // geometry has to scale it up; without it SurfaceFlinger shows it 1:1 in the corner.
+    if (a.txSetGeometry) {
+        // dst_w/dst_h are the size of the buffer we would otherwise composite into, i.e.
+        // the layer's own size; the window is not reliable here because SurfaceFlinger is
+        // free to hand out a differently sized buffer.
+        const TxRect src{0, 0, db->w, db->h};
+        const TxRect dst{0, 0, dst_w > 0 ? dst_w : db->w, dst_h > 0 ? dst_h : db->h};
+        a.txSetGeometry(tx, asc, src, dst, 0);
+    }
+    a.txApply(tx);
+    a.txDelete(tx);
+    return true;
+}
+
+// Lazily connects to the helper inside SurfaceFlinger. Abstract namespace by default:
+// /data/adb is 0700 root, so a file socket is not reachable for surfaceflinger's uid.
+// SFWM_SF_HOOK_SOCK still allows pointing it at a path socket.
+inline int sf_socket()
+{
+    static int sock = -2;
+    if (sock != -2) return sock;
+    const char *path = getenv("SFWM_SF_HOOK_SOCK");
+    const char *name = "sfwm-sf";
+    int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    struct sockaddr_un addr;
+    socklen_t len;
+    memset(&addr, 0, sizeof addr);
+    addr.sun_family = AF_UNIX;
+    if (path) {
+        strncpy(addr.sun_path, path, sizeof addr.sun_path - 1);
+        len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + strlen(addr.sun_path) + 1);
+    } else {
+        memcpy(addr.sun_path + 1, name, strlen(name));
+        len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + strlen(name));
+    }
+    if (s < 0) {
+        sock = -1;
+    } else if (connect(s, (struct sockaddr *)&addr, len) != 0) {
+        close(s);
+        sock = -1;
+        printf("[direct] sf-hook socket not available, using the blit path\n");
+    } else {
+        sock = s;
+        printf("[direct] sf-hook connected\n");
+    }
+    return sock;
+}
+
+// Pool mode: SurfaceFlinger allocates the buffers, the client renders into them and hands
+// them straight back. Nothing is imported per frame, so no per-frame IPC and no reliance on
+// the mapper accepting a foreign dma-buf.
+struct SfPool {
+    bool ready = false;
+    int n = 0;
+    int w = 0, h = 0;
+    uint32_t fourcc = 0;
+    AHardwareBuffer *hb[4] = {};
+    int fd[4] = {-1, -1, -1, -1};
+    int stride_bytes[4] = {};
+};
+
+inline SfPool &sf_pool()
+{
+    static SfPool p;
+    return p;
+}
+
+inline bool sf_pool_ensure(int want_w, int want_h, uint32_t fourcc)
+{
+    SfPool &p = sf_pool();
+    if (p.ready && p.w == want_w && p.h == want_h && p.fourcc == fourcc) return true;
+    Api &a = api();
+    const int sock = sf_socket();
+    if (sock < 0 || !a.recvHandle || !a.getNativeHandle) return false;
+
+    struct {
+        uint32_t magic, width, height, format, count;
+    } req = {0x53465750u, (uint32_t)want_w, (uint32_t)want_h, fourcc, 4};
+    if (send(sock, &req, sizeof req, MSG_NOSIGNAL) != (ssize_t)sizeof req) return false;
+    int32_t status = -1;
+    if (recv(sock, &status, sizeof status, MSG_WAITALL) != (ssize_t)sizeof status) return false;
+    if (status != 0) {
+        printf("[direct] sf pool alloc rejected (%d)\n", status);
+        return false;
+    }
+    p.n = 0;
+    for (int i = 0; i < 4; i++) {
+        AHardwareBuffer *hb = nullptr;
+        if (a.recvHandle(sock, &hb) != 0 || !hb) break;
+        const int *nh = a.getNativeHandle(hb);
+        if (!nh) break;
+        p.hb[p.n] = hb;
+        p.fd[p.n] = nh[1] >= 1 ? nh[3] : -1;
+        p.stride_bytes[p.n] = nh[2] > 24 ? nh[3 + nh[1] + 24] : 0;
+        p.n++;
+    }
+    if (p.n == 0) return false;
+    p.w = want_w;
+    p.h = want_h;
+    p.fourcc = fourcc;
+    p.ready = true;
+    printf("[direct] sf pool ready: %d buffers %dx%d\n", p.n, p.w, p.h);
+    return true;
+}
+
+// Hands one pooled buffer to the layer. The caller has already rendered into it.
+inline bool sf_pool_present(ANativeWindow *win, int idx, int fence_fd, int dst_w, int dst_h)
+{
+    SfPool &p = sf_pool();
+    if (!p.ready || idx < 0 || idx >= p.n) return false;
+    Api &a = api();
+    static ASurfaceControl *asc = nullptr;
+    if (!asc) asc = a.ascFromWindow(win);
+    if (!asc) return false;
+    ASurfaceTransaction *tx = a.txCreate();
+    if (!tx) return false;
+    a.txSetBuffer(tx, asc, p.hb[idx], fence_fd);
+    // The layer is the only thing on screen, so say so: without an explicit opaque flag
+    // SurfaceFlinger kept blending it against whatever was underneath.
+    if (a.txSetTransparency) a.txSetTransparency(tx, asc, 2 /* OPAQUE */);
+    if (a.txSetAlpha) a.txSetAlpha(tx, asc, 1.0f);
+    if (a.txSetFrameRate) {
+        static float rate = -1.f;
+        if (rate < 0.f) {
+            const char *e = getenv("SFWM_FPS");
+            const int fps = e ? atoi(e) : 0;
+            rate = fps > 0 ? (float)fps : 120.f;
+        }
+        a.txSetFrameRate(tx, asc, rate, 1 /* EXACT */);
+    }
+    if (a.txSetGeometry) {
+        const TxRect src{0, 0, p.w, p.h};
+        const TxRect dst{0, 0, dst_w > 0 ? dst_w : p.w, dst_h > 0 ? dst_h : p.h};
+        a.txSetGeometry(tx, asc, src, dst, 0);
+    }
+    a.txApply(tx);
+    a.txDelete(tx);
+    return true;
+}
+
 // Optional: hand the client dma-buf to SurfaceFlinger through the helper that the KSU module
 // preloads into surfaceflinger (android/ksu). IMPORT needs the gralloc mapper and the mapper
 // is a passthrough module that only exists inside SurfaceFlinger, so the import has to happen
 // there; the resulting AHardwareBuffer comes back over the same socket with the CLONE method,
 // which needs no mapper, and is set on our layer here. Returns false whenever the module is
 // not installed or the import failed, and the caller falls back to the blit path.
-inline bool present_via_sfhook(ANativeWindow *win, const DmabufBuf *db) {
+inline bool present_via_sfhook(ANativeWindow *win, const DmabufBuf *db, int dst_w, int dst_h) {
     Api &a = api();
     if (!a.ok || !a.recvHandle || !win || !db) return false;
-    if (db->nplanes != 1 || db->fds[0] < 0 || db->modifier != 0) return false;
+    if (db->nplanes != 1 || db->fds[0] < 0 || db->modifier != 0) {
+        static int once = 0;
+        if (!once++)
+            printf("[direct] sfhook refused: planes=%d fd=%d modifier=0x%llx\n", db->nplanes,
+                   db->fds[0], (unsigned long long)db->modifier);
+        return false;
+    }
     if (!hal_format(db->drm_format)) return false;
 
-    static int sock = -2;
+    const int sock = sf_socket();
     static int failures = 0;
-    if (sock == -2) {
-        // Abstract namespace by default: /data/adb is 0700 root, so a file socket is not
-        // reachable for surfaceflinger's uid. SFWM_SF_HOOK_SOCK still allows a path socket.
-        const char *path = getenv("SFWM_SF_HOOK_SOCK");
-        const char *name = "sfwm-sf";
-        int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-        struct sockaddr_un addr;
-        socklen_t len;
-        memset(&addr, 0, sizeof addr);
-        addr.sun_family = AF_UNIX;
-        if (path) {
-            strncpy(addr.sun_path, path, sizeof addr.sun_path - 1);
-            len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + strlen(addr.sun_path) + 1);
-        } else {
-            memcpy(addr.sun_path + 1, name, strlen(name));
-            len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + strlen(name));
-        }
-        if (s < 0) {
-            sock = -1;
-        } else if (connect(s, (struct sockaddr *)&addr, len) != 0) {
-            close(s);
-            sock = -1;
-            printf("[direct] sf-hook socket not available, using the blit path\n");
-        } else {
-            sock = s;
-            printf("[direct] sf-hook connected\n");
-        }
-    }
     if (sock < 0) return false;
-    if (failures > 3) return false;   // give up quickly instead of stalling every frame
+    // Retry after a cooldown instead of giving up for the whole run: a burst of failures
+    // during client startup used to disable the fast path permanently.
+    if (failures > 3) {
+        static int cooldown = 0;
+        if (++cooldown < 120) return false;
+        cooldown = 0;
+        failures = 0;
+    }
+
+    // No cache here on purpose: the client recycles dmabuf fds when it recreates its
+    // swapchain, and an AHardwareBuffer imported for the previous owner keeps pointing at a
+    // buffer nobody draws into any more (the screen simply goes black). Importing per frame
+    // costs one short socket round trip, which is far cheaper than the composite it replaces.
 
     struct Req {
         uint32_t magic, width, height, fourcc, stride;
@@ -513,6 +683,8 @@ inline bool present_via_sfhook(ANativeWindow *win, const DmabufBuf *db) {
     msg.msg_controllen = c->cmsg_len;
 
     if (sendmsg(sock, &msg, MSG_NOSIGNAL) < 0) {
+        static int once = 0;
+        if (!once++) printf("[direct] sf-hook sendmsg failed: %d\n", errno);
         failures++;
         return false;
     }
@@ -539,46 +711,16 @@ inline bool present_via_sfhook(ANativeWindow *win, const DmabufBuf *db) {
         return false;
     }
     AHardwareBuffer *hb = nullptr;
-    if (a.recvHandle(sock, &hb) != 0 || !hb) {
+    const int rc = a.recvHandle(sock, &hb);
+    if (rc != 0 || !hb) {
+        static int once = 0;
+        if (!once++) printf("[direct] sf-hook recvHandle failed: rc=%d hb=%p\n", rc, (void *)hb);
         failures++;
         return false;
     }
-
-    static ASurfaceControl *asc = nullptr;
-    if (!asc) asc = a.ascFromWindow(win);
-    if (!asc) {
-        a.hbRelease(hb);
-        return false;
-    }
-    ASurfaceTransaction *tx = a.txCreate();
-    if (!tx) {
-        a.hbRelease(hb);
-        return false;
-    }
-    a.txSetBuffer(tx, asc, hb, -1);
-    // The layer now carries the client's own buffer instead of a composited one, so the
-    // geometry has to scale it up to the layer; without it SurfaceFlinger shows it 1:1 in
-    // the corner and leaves the rest of the screen untouched.
-    if (a.txSetGeometry) {
-        static int sw = 0, sh = 0;
-        if (sw <= 0) {
-            typedef int32_t (*Fn_getW)(ANativeWindow *);
-            typedef int32_t (*Fn_getH)(ANativeWindow *);
-            static Fn_getW p_w = (Fn_getW)dlsym(RTLD_DEFAULT, "ANativeWindow_getWidth");
-            static Fn_getH p_h = (Fn_getH)dlsym(RTLD_DEFAULT, "ANativeWindow_getHeight");
-            sw = p_w ? p_w(win) : 0;
-            sh = p_h ? p_h(win) : 0;
-        }
-        const TxRect src{0, 0, db->w, db->h};
-        const TxRect dst{0, 0, sw > 0 ? sw : db->w, sh > 0 ? sh : db->h};
-        a.txSetGeometry(tx, asc, src, dst, 0);
-    }
-    a.txApply(tx);
-    a.txDelete(tx);
-    a.hbRelease(hb);
     static int once = 0;
     if (!once++) printf("[direct] sf-hook import ok, scanout without compositing\n");
-    return true;
+    return present_attach(a, win, db, hb, dst_w, dst_h);
 }
 
 }   // namespace direct
