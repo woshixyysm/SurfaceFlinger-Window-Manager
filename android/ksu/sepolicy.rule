@@ -1,0 +1,12 @@
+# SELinux rules for the optional sfwm-sfhook module.
+#
+# surfaceflinger has to be able to read the module directory to load the helper, and to
+# talk to the socket its own thread created. Everything else stays untouched.
+#
+# KernelSU applies this file automatically when the module is enabled. If your kernel does
+# not support sepolicy.rule, the module simply will not load the helper and sfwm keeps
+# working the way it did.
+
+allow surfaceflinger system_data_file dir { search open read getattr }
+allow surfaceflinger system_data_file file { read open getattr map execute execute_no_trans }
+allow surfaceflinger system_data_file sock_file { read write open create unlink getattr }

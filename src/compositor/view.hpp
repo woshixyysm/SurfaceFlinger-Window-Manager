@@ -633,6 +633,19 @@ struct View {
                             // HAL_PIXEL_FORMAT_RGBA_8888 (1) is DRM_FORMAT_ABGR8888,
                             // HAL_PIXEL_FORMAT_BGRA_8888 (5) is DRM_FORMAT_ARGB8888.
                             const uint32_t dfourcc = w32[17] == 1 ? 0x34324241u : 0x34325241u;
+                            // Optional: let the preloaded helper inside SurfaceFlinger do the
+                            // import and return the buffer (see android/ksu).
+                            static const bool sfhook_on = getenv("SFWM_SF_HOOK") != nullptr;
+                            if (sfhook_on && direct::present_via_sfhook(layer.win, db)) {
+                                p_cancel(layer.win, anwb, -1);
+                                if (getenv("SFWM_FRAMETIME") && (++frames % 60) == 0)
+                                    printf("[perf] sfhook %dx%d -> sf %dx%d %u ms\n",
+                                           db->w, db->h, dw, dh, now_ms() - __tzc);
+                                sync_signal_release(this);
+                                wl_buffer_send_release(buffer);
+                                return;
+                            }
+
                             // Direct scanout, shaped-handle variant: wrap the client dmabuf in a
                             // handle cloned from a real SurfaceFlinger one and let SurfaceFlinger
                             // composite it. No blit at all, so the composite cost disappears.
@@ -648,8 +661,9 @@ struct View {
                                        tmpl_nfds, tmpl_nints);
                             }
                             if (shaped_on && tmpl_nints > 0 &&
-                                direct::present_shaped(layer.win, db, tmpl_ints, tmpl_nfds,
-                                                       tmpl_nints)) {
+                                (direct::present_graft(layer.win, db) ||
+                                 direct::present_shaped(layer.win, db, tmpl_ints, tmpl_nfds,
+                                                        tmpl_nints))) {
                                 p_cancel(layer.win, anwb, -1);
                                 if (getenv("SFWM_FRAMETIME") && (++frames % 60) == 0)
                                     printf("[perf] direct %dx%d -> sf %dx%d %u ms\n",

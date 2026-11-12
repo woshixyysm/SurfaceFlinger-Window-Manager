@@ -6,3 +6,7 @@ android/libs/
 /sfwm
 *.raw
 *.png
+
+# built KSU module payload
+android/ksu/lib/
+android/ksu/system/

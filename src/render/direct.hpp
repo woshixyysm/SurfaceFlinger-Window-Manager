@@ -19,8 +19,11 @@
 #include <dlfcn.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 namespace direct {
@@ -37,7 +40,7 @@ struct AHardwareBuffer_Desc {
     uint32_t format;
     uint64_t usage;
     uint32_t stride;
-    uint64_t rfu0;
+    uint32_t rfu0;
     uint64_t rfu1;
 };
 
@@ -48,12 +51,19 @@ enum {
     AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM = 5,
     AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE = 0x100,
     AHARDWAREBUFFER_USAGE_COMPOSER_OVERLAY = 0x800,
+    // IMPORT goes through the mapper, which SurfaceFlinger keeps to itself: from an
+    // unprivileged process every IMPORT fails with EINVAL. CLONE only duplicates the
+    // handle, so the buffer is imported later, by SurfaceFlinger, in its own process.
     AHARDWAREBUFFER_CREATE_FROM_HANDLE_METHOD_IMPORT = 1,
+    AHARDWAREBUFFER_CREATE_FROM_HANDLE_METHOD_CLONE = 2,
 };
 
 // Returns a status code (-errno on failure) and hands the buffer back through outBuffer.
 typedef int32_t (*PFN_createFromHandle)(const AHardwareBuffer_Desc *, const void *, int32_t,
                                         AHardwareBuffer **);
+typedef int32_t (*PFN_allocHb)(const AHardwareBuffer_Desc *, AHardwareBuffer **);
+typedef const int *(*PFN_getNativeHandle)(const AHardwareBuffer *);
+typedef int32_t (*PFN_recvHandle)(int32_t, AHardwareBuffer **);
 typedef void (*PFN_hbRelease)(AHardwareBuffer *);
 typedef ASurfaceControl *(*PFN_ascFromWindow)(ANativeWindow *);
 typedef void (*PFN_ascRelease)(ASurfaceControl *);
@@ -68,6 +78,9 @@ typedef void (*PFN_nhDelete)(void *);
 struct Api {
     bool ok = false;
     PFN_createFromHandle createFromHandle = nullptr;
+    PFN_allocHb allocHb = nullptr;
+    PFN_getNativeHandle getNativeHandle = nullptr;
+    PFN_recvHandle recvHandle = nullptr;
     PFN_hbRelease hbRelease = nullptr;
     PFN_ascFromWindow ascFromWindow = nullptr;
     PFN_ascRelease ascRelease = nullptr;
@@ -92,6 +105,9 @@ inline Api &api() {
         return a;
     }
     a.createFromHandle = (PFN_createFromHandle)dlsym(nw, "AHardwareBuffer_createFromHandle");
+    a.allocHb = (PFN_allocHb)dlsym(nw, "AHardwareBuffer_allocate");
+    a.getNativeHandle = (PFN_getNativeHandle)dlsym(nw, "AHardwareBuffer_getNativeHandle");
+    a.recvHandle = (PFN_recvHandle)dlsym(nw, "AHardwareBuffer_recvHandleFromUnixSocket");
     a.hbRelease = (PFN_hbRelease)dlsym(nw, "AHardwareBuffer_release");
     a.ascFromWindow = (PFN_ascFromWindow)dlsym(an, "ASurfaceControl_createFromWindow");
     a.ascRelease = (PFN_ascRelease)dlsym(an, "ASurfaceControl_release");
@@ -192,7 +208,7 @@ inline bool present(ANativeWindow *win, const DmabufBuf *db) {
         ((int *)nh)[3] = db->fds[0];   // native_handle_t::data[0]
         AHardwareBuffer *nb = nullptr;
         const int32_t res =
-            a.createFromHandle(&d, nh, AHARDWAREBUFFER_CREATE_FROM_HANDLE_METHOD_IMPORT, &nb);
+            a.createFromHandle(&d, nh, AHARDWAREBUFFER_CREATE_FROM_HANDLE_METHOD_CLONE, &nb);
         nh_free(nh);
         if (res != 0 || !nb) {
             static int warned = 0;
@@ -266,11 +282,13 @@ inline bool present_shaped(ANativeWindow *win, const DmabufBuf *db, const uint32
         for (int i = 1; i < tmpl_nfds; i++) p[3 + i] = dup(db->fds[0]);
         int *ints = p + 3 + tmpl_nfds;
         memcpy(ints, tmpl_ints, (size_t)tmpl_nints * sizeof(int));
-        ints[2] = (int)db->stride[0];                        // stride in bytes
+        ints[2] = (int)(db->stride[0] / 4u);                 // stride in pixels
         ints[3] = (int)db->h;
         ints[4] = (int)db->w;
+        ints[5] = (int)db->h;
         ints[6] = (int)fmt;
         ints[13] = (int)((uint32_t)db->stride[0] * (uint32_t)db->h);   // allocation size
+        if (tmpl_nints > 24) ints[24] = (int)db->stride[0];            // stride in bytes
 
         AHardwareBuffer_Desc d = {};
         d.width = (uint32_t)db->w;
@@ -281,7 +299,7 @@ inline bool present_shaped(ANativeWindow *win, const DmabufBuf *db, const uint32
         d.stride = db->stride[0] / 4u;
         AHardwareBuffer *nb = nullptr;
         const int32_t res =
-            a.createFromHandle(&d, nh, AHARDWAREBUFFER_CREATE_FROM_HANDLE_METHOD_IMPORT, &nb);
+            a.createFromHandle(&d, nh, AHARDWAREBUFFER_CREATE_FROM_HANDLE_METHOD_CLONE, &nb);
         const int err = errno;
         if (log) {
             dbg++;
@@ -313,6 +331,206 @@ inline bool present_shaped(ANativeWindow *win, const DmabufBuf *db, const uint32
     a.txApply(tx);
     a.txDelete(tx);
     if (log) printf("[direct] shaped buffer applied\n");
+    return true;
+}
+
+// Allocate a throwaway buffer of exactly the client's geometry so gralloc generates a legal
+// handle for it, then swap in the client's dmabuf. A handle cloned from some other buffer is
+// rejected: the vendor mapper validates the whole layout against the allocation it made.
+inline bool present_graft(ANativeWindow *win, const DmabufBuf *db) {
+    Api &a = api();
+    if (!a.ok || !win || !db || !a.allocHb || !a.getNativeHandle) return false;
+    if (db->nplanes != 1 || db->fds[0] < 0 || db->modifier != 0) return false;
+    const uint32_t fmt = hal_format(db->drm_format);
+    if (!fmt) return false;
+
+    struct Graft {
+        AHardwareBuffer *src = nullptr;   // the throwaway allocation that owns the handle shape
+        int *ints = nullptr;
+        int nfds = 0, nints = 0;
+        uint32_t w = 0, h = 0, fmt = 0;
+    };
+    static Graft g[4];
+    static ANativeWindow *gw[4] = {nullptr};
+    int slot = -1;
+    for (int i = 0; i < 4; i++) {
+        if (gw[i] == win) { slot = i; break; }
+        if (!gw[i]) { gw[i] = win; slot = i; break; }
+    }
+    if (slot < 0) return false;
+    Graft &gr = g[slot];
+
+    if (!gr.src || gr.w != (uint32_t)db->w || gr.h != (uint32_t)db->h || gr.fmt != fmt) {
+        if (gr.ints) { free(gr.ints); gr.ints = nullptr; }
+        if (gr.src) { a.hbRelease(gr.src); gr.src = nullptr; }
+        AHardwareBuffer_Desc d = {};
+        d.width = (uint32_t)db->w;
+        d.height = (uint32_t)db->h;
+        d.layers = 1;
+        d.format = fmt;
+        d.usage = 0x800ULL;   // COMPOSER_OVERLAY: enough for a handle, no GPU mapping needed
+        AHardwareBuffer *src = nullptr;
+        if (a.allocHb(&d, &src) != 0 || !src) {
+            static int w0 = 0;
+            if (w0++ < 2) printf("[direct] graft allocation failed %dx%d\n", db->w, db->h);
+            return false;
+        }
+        const int *h = a.getNativeHandle(src);
+        if (!h) { a.hbRelease(src); return false; }
+        gr.src = src;
+        gr.nfds = h[1];
+        gr.nints = h[2];
+        gr.ints = (int *)malloc(sizeof(int) * (size_t)gr.nints);
+        memcpy(gr.ints, h + 3 + h[1], sizeof(int) * (size_t)gr.nints);
+        gr.w = (uint32_t)db->w;
+        gr.h = (uint32_t)db->h;
+        gr.fmt = fmt;
+        printf("[direct] graft template %dx%d fmt=%u nfds=%d nints=%d\n", db->w, db->h, fmt,
+               gr.nfds, gr.nints);
+    }
+
+    // Handle sized for the template's layout; only the fds and the stride/size change.
+    const size_t nhsz = sizeof(int) * 3 + sizeof(int) * (size_t)(gr.nfds + gr.nints);
+    int *nh = (int *)malloc(nhsz);
+    if (!nh) return false;
+    nh[0] = 12;
+    nh[1] = gr.nfds;
+    nh[2] = gr.nints;
+    nh[3] = db->fds[0];
+    for (int i = 1; i < gr.nfds; i++) nh[3 + i] = dup(db->fds[0]);
+    int *ints = nh + 3 + gr.nfds;
+    memcpy(ints, gr.ints, sizeof(int) * (size_t)gr.nints);
+    const uint32_t stride_px = db->stride[0] / 4u;
+    if (gr.nints > 2)  ints[2] = (int)stride_px;
+    if (gr.nints > 5)  { ints[3] = db->h; ints[4] = db->w; ints[5] = db->h; }
+    if (gr.nints > 6)  ints[6] = (int)fmt;
+    if (gr.nints > 13) ints[13] = (int)(db->stride[0] * (uint32_t)db->h);
+    if (gr.nints > 24) ints[24] = (int)db->stride[0];
+
+    AHardwareBuffer_Desc d = {};
+    d.width = (uint32_t)db->w;
+    d.height = (uint32_t)db->h;
+    d.layers = 1;
+    d.format = fmt;
+    d.usage = 0x100ULL | 0x800ULL;
+    d.stride = stride_px;
+    AHardwareBuffer *dst = nullptr;
+    const int32_t res = a.createFromHandle(&d, nh, AHARDWAREBUFFER_CREATE_FROM_HANDLE_METHOD_CLONE, &dst);
+    for (int i = 0; i < gr.nfds; i++)
+        if (i < gr.nfds && nh[3 + i] >= 0 && i > 0) close(nh[3 + i]);
+    free(nh);
+    {
+        static int n = 0;
+        if (n++ < 4)
+            printf("[direct] graft %dx%d stride_px=%u -> res=%d hb=%p\n", db->w, db->h, stride_px,
+                   res, (void *)dst);
+    }
+    if (res != 0 || !dst) return false;
+
+    static ASurfaceControl *asc[4] = {nullptr};
+    if (!asc[slot]) asc[slot] = a.ascFromWindow(win);
+    if (!asc[slot]) { a.hbRelease(dst); return false; }
+    ASurfaceTransaction *tx = a.txCreate();
+    if (!tx) { a.hbRelease(dst); return false; }
+    a.txSetBuffer(tx, asc[slot], dst, -1);
+    a.txApply(tx);
+    a.txDelete(tx);
+    a.hbRelease(dst);
+    return true;
+}
+
+// Optional: hand the client dma-buf to SurfaceFlinger through the helper that the KSU module
+// preloads into surfaceflinger (android/ksu). IMPORT needs the gralloc mapper and the mapper
+// is a passthrough module that only exists inside SurfaceFlinger, so the import has to happen
+// there; the resulting AHardwareBuffer comes back over the same socket with the CLONE method,
+// which needs no mapper, and is set on our layer here. Returns false whenever the module is
+// not installed or the import failed, and the caller falls back to the blit path.
+inline bool present_via_sfhook(ANativeWindow *win, const DmabufBuf *db) {
+    Api &a = api();
+    if (!a.ok || !a.recvHandle || !win || !db) return false;
+    if (db->nplanes != 1 || db->fds[0] < 0 || db->modifier != 0) return false;
+    if (!hal_format(db->drm_format)) return false;
+
+    static int sock = -2;
+    static int failures = 0;
+    if (sock == -2) {
+        const char *path = getenv("SFWM_SF_HOOK_SOCK");
+        if (!path) path = "/data/adb/sfwm-sf/sf.sock";
+        int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (s < 0) {
+            sock = -1;
+        } else {
+            struct sockaddr_un addr;
+            memset(&addr, 0, sizeof addr);
+            addr.sun_family = AF_UNIX;
+            strncpy(addr.sun_path, path, sizeof addr.sun_path - 1);
+            if (connect(s, (struct sockaddr *)&addr, sizeof addr) != 0) {
+                close(s);
+                sock = -1;
+                printf("[direct] sf-hook socket not available (%s), using the blit path\n", path);
+            } else {
+                sock = s;
+                printf("[direct] sf-hook connected: %s\n", path);
+            }
+        }
+    }
+    if (sock < 0) return false;
+    if (failures > 3) return false;   // give up quickly instead of stalling every frame
+
+    struct Req {
+        uint32_t magic, width, height, fourcc, stride;
+    } req = {0x5346574du, (uint32_t)db->w, (uint32_t)db->h, db->drm_format, db->stride[0]};
+
+    struct iovec iov = {&req, sizeof req};
+    char ctl[CMSG_SPACE(sizeof(int))];
+    memset(ctl, 0, sizeof ctl);
+    struct msghdr msg;
+    memset(&msg, 0, sizeof msg);
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = ctl;
+    msg.msg_controllen = sizeof ctl;
+    struct cmsghdr *c = CMSG_FIRSTHDR(&msg);
+    c->cmsg_level = SOL_SOCKET;
+    c->cmsg_type = SCM_RIGHTS;
+    c->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(c), &db->fds[0], sizeof(int));
+    msg.msg_controllen = c->cmsg_len;
+
+    if (sendmsg(sock, &msg, MSG_NOSIGNAL) < 0) {
+        failures++;
+        return false;
+    }
+    int32_t status = -1;
+    ssize_t n = recv(sock, &status, sizeof status, MSG_WAITALL);
+    if (n != (ssize_t)sizeof status || status != 0) {
+        if (failures++ < 3)
+            printf("[direct] sf-hook import rejected (%d), using the blit path\n", status);
+        return false;
+    }
+    AHardwareBuffer *hb = nullptr;
+    if (a.recvHandle(sock, &hb) != 0 || !hb) {
+        failures++;
+        return false;
+    }
+
+    static ASurfaceControl *asc = nullptr;
+    if (!asc) asc = a.ascFromWindow(win);
+    if (!asc) {
+        a.hbRelease(hb);
+        return false;
+    }
+    ASurfaceTransaction *tx = a.txCreate();
+    if (!tx) {
+        a.hbRelease(hb);
+        return false;
+    }
+    a.txSetBuffer(tx, asc, hb, -1);
+    a.txApply(tx);
+    a.txDelete(tx);
+    a.hbRelease(hb);
+    static int once = 0;
+    if (!once++) printf("[direct] sf-hook import ok, scanout without compositing\n");
     return true;
 }
 

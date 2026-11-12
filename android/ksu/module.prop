@@ -1,0 +1,6 @@
+id=sfwm-sfhook
+name=sfwm SurfaceFlinger hook (optional)
+version=v1.0
+versionCode=1
+author=sfwm
+description=OPTIONAL. Lets sfwm hand a client dma-buf to SurfaceFlinger for scanout without compositing it. Not needed for sfwm to run; only try it if you want to remove the last composite step. Experimental, may restart the system UI.
