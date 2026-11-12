@@ -651,8 +651,11 @@ struct View {
                                         db->offset[0], db->modifier, pl.fd[idx], (uint32_t)pl.w,
                                         (uint32_t)pl.h, pfcc, (uint32_t)pl.stride_bytes[idx], 0u,
                                         0ull, (int)db->w, (int)db->h, !is_cursor) &&
-                                    direct::sf_pool_present(layer.win, idx, -1, g_out_w,
-                                                            g_out_h)) {
+                                    (getenv("SFWM_SF_POOL_ATTACH")
+                                         ? direct::present_attach(direct::api(), layer.win, db,
+                                                                  pl.hb[idx], g_out_w, g_out_h)
+                                         : direct::sf_pool_present(layer.win, idx, -1, g_out_w,
+                                                                   g_out_h))) {
                                     static bool checked = false;
                                     if (!checked) {
                                         checked = true;
@@ -679,7 +682,7 @@ struct View {
                             }
                         }
                         if (sfhook_on && !sfpool_on &&
-                            direct::present_via_sfhook(layer.win, db, g_out_w, g_out_h)) {
+                            direct::present_via_sfhook(layer.win, db, (uint64_t)(uintptr_t)buffer, g_out_w, g_out_h)) {
                             if (getenv("SFWM_FRAMETIME") && (++frames % 60) == 0) {
                                 static uint32_t last_ms = 0;
                                 const uint32_t t = now_ms();

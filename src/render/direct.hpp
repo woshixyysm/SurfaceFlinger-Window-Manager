@@ -504,9 +504,20 @@ inline bool present_attach(Api &a, ANativeWindow *win, const DmabufBuf *db, AHar
 // Lazily connects to the helper inside SurfaceFlinger. Abstract namespace by default:
 // /data/adb is 0700 root, so a file socket is not reachable for surfaceflinger's uid.
 // SFWM_SF_HOOK_SOCK still allows pointing it at a path socket.
+inline int g_sf_sock = -2;
+
+// Drops the cached connection so the next call dials again. A socket that died with
+// surfaceflinger used to stay cached forever, which silently disabled the fast path and
+// looked exactly like the hook doing nothing.
+inline void sf_socket_drop()
+{
+    if (g_sf_sock >= 0) close(g_sf_sock);
+    g_sf_sock = -2;
+}
+
 inline int sf_socket()
 {
-    static int sock = -2;
+    int &sock = g_sf_sock;
     if (sock != -2) return sock;
     const char *path = getenv("SFWM_SF_HOOK_SOCK");
     const char *name = "sfwm-sf";
@@ -559,21 +570,68 @@ inline bool sf_pool_ensure(int want_w, int want_h, uint32_t fourcc)
     SfPool &p = sf_pool();
     if (p.ready && p.w == want_w && p.h == want_h && p.fourcc == fourcc) return true;
     Api &a = api();
+    // Ablation / simpler variant: the client can allocate gralloc buffers itself, no helper
+    // and no SurfaceFlinger involvement at allocation time.
+    if (getenv("SFWM_SF_POOL_LOCAL")) {
+        if (!a.allocHb || !a.getNativeHandle) return false;
+        struct ahb_desc_local {
+            uint32_t width, height, layers, format;
+            uint64_t usage;
+            uint32_t stride, rfu0;
+            uint64_t rfu1;
+        } d;
+        memset(&d, 0, sizeof d);
+        d.width = (uint32_t)want_w;
+        d.height = (uint32_t)want_h;
+        d.layers = 1;
+        d.format = 5;   // HAL_PIXEL_FORMAT_BGRA_8888
+        d.usage = 0x300ULL | 0x800ULL;
+        p.n = 0;
+        for (int i = 0; i < 2; i++) {
+            AHardwareBuffer *hb = nullptr;
+            if (a.allocHb((const AHardwareBuffer_Desc *)&d, &hb) != 0 || !hb) break;
+            const int *nh = a.getNativeHandle(hb);
+            if (!nh) break;
+            p.hb[p.n] = hb;
+            p.fd[p.n] = nh[1] >= 1 ? nh[3] : -1;
+            p.stride_bytes[p.n] = nh[2] > 24 ? nh[3 + nh[1] + 24] : 0;
+            p.n++;
+        }
+        if (p.n == 0) return false;
+        p.w = want_w;
+        p.h = want_h;
+        p.fourcc = fourcc;
+        p.ready = true;
+        printf("[direct] local pool ready: %d buffers %dx%d stride=%d\n", p.n, p.w, p.h,
+               p.stride_bytes[0]);
+        return true;
+    }
     const int sock = sf_socket();
     if (sock < 0 || !a.recvHandle || !a.getNativeHandle) return false;
 
     struct {
         uint32_t magic, width, height, format, count;
-    } req = {0x53465750u, (uint32_t)want_w, (uint32_t)want_h, fourcc, 4};
-    if (send(sock, &req, sizeof req, MSG_NOSIGNAL) != (ssize_t)sizeof req) return false;
+    } req = {0x53465750u, (uint32_t)want_w, (uint32_t)want_h, fourcc, 1};
+    if (send(sock, &req, sizeof req, MSG_NOSIGNAL) != (ssize_t)sizeof req) {
+        sf_socket_drop();
+        return false;
+    }
     int32_t status = -1;
-    if (recv(sock, &status, sizeof status, MSG_WAITALL) != (ssize_t)sizeof status) return false;
+    if (recv(sock, &status, sizeof status, MSG_WAITALL) != (ssize_t)sizeof status) {
+        sf_socket_drop();
+        return false;
+    }
     if (status != 0) {
         printf("[direct] sf pool alloc rejected (%d)\n", status);
         return false;
     }
+    int32_t got = 0;
+    if (recv(sock, &got, sizeof got, MSG_WAITALL) != (ssize_t)sizeof got || got <= 0) {
+        sf_socket_drop();
+        return false;
+    }
     p.n = 0;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < got && i < 4; i++) {
         AHardwareBuffer *hb = nullptr;
         if (a.recvHandle(sock, &hb) != 0 || !hb) break;
         const int *nh = a.getNativeHandle(hb);
@@ -604,10 +662,6 @@ inline bool sf_pool_present(ANativeWindow *win, int idx, int fence_fd, int dst_w
     ASurfaceTransaction *tx = a.txCreate();
     if (!tx) return false;
     a.txSetBuffer(tx, asc, p.hb[idx], fence_fd);
-    // The layer is the only thing on screen, so say so: without an explicit opaque flag
-    // SurfaceFlinger kept blending it against whatever was underneath.
-    if (a.txSetTransparency) a.txSetTransparency(tx, asc, 2 /* OPAQUE */);
-    if (a.txSetAlpha) a.txSetAlpha(tx, asc, 1.0f);
     if (a.txSetFrameRate) {
         static float rate = -1.f;
         if (rate < 0.f) {
@@ -633,7 +687,8 @@ inline bool sf_pool_present(ANativeWindow *win, int idx, int fence_fd, int dst_w
 // there; the resulting AHardwareBuffer comes back over the same socket with the CLONE method,
 // which needs no mapper, and is set on our layer here. Returns false whenever the module is
 // not installed or the import failed, and the caller falls back to the blit path.
-inline bool present_via_sfhook(ANativeWindow *win, const DmabufBuf *db, int dst_w, int dst_h) {
+inline bool present_via_sfhook(ANativeWindow *win, const DmabufBuf *db, uint64_t cookie,
+                               int dst_w, int dst_h) {
     Api &a = api();
     if (!a.ok || !a.recvHandle || !win || !db) return false;
     if (db->nplanes != 1 || db->fds[0] < 0 || db->modifier != 0) {
@@ -662,11 +717,16 @@ inline bool present_via_sfhook(ANativeWindow *win, const DmabufBuf *db, int dst_
     // buffer nobody draws into any more (the screen simply goes black). Importing per frame
     // costs one short socket round trip, which is far cheaper than the composite it replaces.
 
-    struct Req {
-        uint32_t magic, width, height, fourcc, stride;
-    } req = {0x5346574du, (uint32_t)db->w, (uint32_t)db->h, db->drm_format, db->stride[0]};
+    // One fixed 28-byte frame: five little-endian uint32 fields then the 8-byte cookie.
+    // Hand-built so that neither compiler padding nor a split write can shift the stream.
+    unsigned char frame[28];
+    const uint32_t fields[5] = {0x5346574du, (uint32_t)db->w, (uint32_t)db->h, db->drm_format,
+                                db->stride[0]};
+    for (int i = 0; i < 5; i++)
+        for (int b = 0; b < 4; b++) frame[i * 4 + b] = (unsigned char)(fields[i] >> (8 * b));
+    for (int b = 0; b < 8; b++) frame[20 + b] = (unsigned char)(cookie >> (8 * b));
 
-    struct iovec iov = {&req, sizeof req};
+    struct iovec iov = {frame, sizeof frame};
     char ctl[CMSG_SPACE(sizeof(int))];
     memset(ctl, 0, sizeof ctl);
     struct msghdr msg;
@@ -683,6 +743,7 @@ inline bool present_via_sfhook(ANativeWindow *win, const DmabufBuf *db, int dst_
     msg.msg_controllen = c->cmsg_len;
 
     if (sendmsg(sock, &msg, MSG_NOSIGNAL) < 0) {
+        sf_socket_drop();
         static int once = 0;
         if (!once++) printf("[direct] sf-hook sendmsg failed: %d\n", errno);
         failures++;

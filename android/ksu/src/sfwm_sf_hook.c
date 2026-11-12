@@ -77,13 +77,19 @@ static fn_get_native p_get_native;
 #define SFWM_SF_ALLOWED_UID 10391
 #endif
 
-struct request {
-    uint32_t magic;
-    uint32_t width;
-    uint32_t height;
-    uint32_t format;
-    uint32_t stride;
-};
+// One fixed 28-byte frame: five little-endian uint32 fields then the 8-byte cookie. Built by
+// hand on both sides so neither compiler padding nor a split write can shift the stream.
+#define SFWM_SF_REQ_BYTES 28
+
+static uint32_t rd_u32(const unsigned char *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static uint64_t rd_u64(const unsigned char *p)
+{
+    return (uint64_t)rd_u32(p) | ((uint64_t)rd_u32(p + 4) << 32);
+}
 
 // 'SFWP': allocate a pool of buffers inside SurfaceFlinger and hand them to the client,
 // instead of the client handing a foreign dma-buf in. Everything stays an allocation the
@@ -99,6 +105,40 @@ struct alloc_request {
     uint32_t format;
     uint32_t count;
 };
+
+struct request {
+    uint32_t magic;
+    uint32_t width;
+    uint32_t height;
+    uint32_t format;
+    uint32_t stride;
+    uint64_t cookie;
+};
+
+// Parses one fixed 28-byte frame into a request. Manual little-endian decoding keeps the wire
+// format independent of both compilers' padding rules.
+static int parse_req(const unsigned char *p, struct request *out)
+{
+    out->magic = rd_u32(p);
+    out->width = rd_u32(p + 4);
+    out->height = rd_u32(p + 8);
+    out->format = rd_u32(p + 12);
+    out->stride = rd_u32(p + 16);
+    out->cookie = rd_u64(p + 20);
+    return 0;
+}
+
+// Imported buffers, keyed by the client's own per-buffer cookie. Importing costs ~16 ms per
+// frame, so a client that cycles through a few buffers only pays for each one once; keying
+// on the cookie (not the dma-buf fd, which gets recycled) keeps the mapping valid.
+struct cached_buf {
+    uint64_t cookie;
+    uint32_t w, h, stride;
+    AHardwareBuffer *hb;
+};
+#define SFWM_SF_CACHE 16
+static struct cached_buf g_cache[SFWM_SF_CACHE];
+static int g_cache_n;
 
 // Copy FreeDesktop DRM fourcc to HAL_PIXEL_FORMAT_*. Kept local so the helper has no
 // dependency beyond libc and libnativewindow.
@@ -171,18 +211,40 @@ static int32_t serve_alloc(int sock, const struct alloc_request *r)
         // and the layer stays black while every frame is "presented".
         d.usage = 0x300ULL | AHB_USAGE_COMPOSER_OVERLAY;
         for (; n < (int)r->count; n++) {
-            if (p_alloc(&d, &pool[n]) != 0 || !pool[n]) {
-                status = -ENOMEM;
+            AHardwareBuffer *buf = NULL;
+            if (p_alloc(&d, &buf) != 0 || !buf) {
+                // Partial success is fine: the client renders into whatever we managed to
+                // allocate, it just cycles through fewer buffers.
+                status = n > 0 ? 0 : -ENOMEM;
                 break;
             }
+            // Re-import our own allocation so the mapper registers it exactly the way the
+            // per-frame import path does. SurfaceFlinger only accepts a buffer that came
+            // back from createFromHandle here; a plain allocation (ours or the client's) is
+            // silently dropped and the layer ends up with no buffer at all.
+            const int *tnh = p_get_native(buf);
+            AHardwareBuffer *norm = NULL;
+            if (tnh && p_from_handle(&d, tnh, 1 /* IMPORT */, &norm) == 0 && norm) {
+                p_release(buf);
+                pool[n] = norm;
+            } else {
+                LOGI("pool buffer left unregistered");
+                pool[n] = buf;
+            }
         }
-        if (status == 0) n = (int)r->count;
+        if (n == (int)r->count) status = 0;
     }
 
     if (send(sock, &status, sizeof status, MSG_NOSIGNAL) != (ssize_t)sizeof status) status = -1;
     if (status == 0) {
-        for (int i = 0; i < n; i++)
-            if (p_send && p_send(pool[i], sock) != 0) break;
+        // Tell the client how many actually made it; allocating four 1272x2800 GPU buffers
+        // inside SurfaceFlinger can run into ENOMEM, and a smaller pool is still useful.
+        const int32_t got = n;
+        if (send(sock, &got, sizeof got, MSG_NOSIGNAL) != (ssize_t)sizeof got) status = -1;
+        if (status == 0) {
+            for (int i = 0; i < n; i++)
+                if (p_send && p_send(pool[i], sock) != 0) break;
+        }
     }
     for (int i = 0; i < n; i++)
         if (pool[i]) p_release(pool[i]);
@@ -228,7 +290,7 @@ static int32_t import_dmabuf(uint32_t width, uint32_t height, uint32_t hal_forma
     rd.height = height;
     rd.layers = 1;
     rd.format = hal_format;
-    rd.usage = 0x100ULL | AHB_USAGE_COMPOSER_OVERLAY;
+    rd.usage = 0x300ULL | AHB_USAGE_COMPOSER_OVERLAY;
     rd.stride = stride_px;
 
     AHardwareBuffer *shape = NULL;
@@ -333,14 +395,36 @@ static int serve_client(int sock)
     int fd = -1;
     AHardwareBuffer *buffer = NULL;
     int32_t status;
+    unsigned char frame[SFWM_SF_REQ_BYTES];
 
-    if (recv_req(sock, &req, sizeof req, &fd) != 0) return -1;
+    if (recv_req(sock, frame, sizeof frame, &fd) != 0) return -1;
+    parse_req(frame, &req);
     if (req.magic == SFWM_SF_MAGIC_ALLOC) {
-        // Same message size as `request`; the fifth word is the count instead of the stride.
         struct alloc_request ar;
-        memcpy(&ar, &req, sizeof ar);
+        memset(&ar, 0, sizeof ar);
+        ar.magic = req.magic;
+        ar.width = req.width;
+        ar.height = req.height;
+        ar.format = req.format;
+        ar.count = req.stride;
         serve_alloc(sock, &ar);
         return 0;
+    }
+    const uint64_t cookie = req.cookie;
+    // A buffer we already imported: reuse it instead of paying for the import again.
+    if (cookie) {
+        const uint32_t hal = hal_format_from_fourcc(req.format);
+        for (int i = 0; i < g_cache_n; i++) {
+            struct cached_buf *c = &g_cache[i];
+            if (c->cookie == cookie && c->w == req.width && c->h == req.height) {
+                const int32_t ok = 0;
+                if (send(sock, &ok, sizeof ok, MSG_NOSIGNAL) == (ssize_t)sizeof ok && p_send)
+                    p_send(c->hb, sock);
+                if (fd >= 0) close(fd);
+                return 0;
+            }
+        }
+        (void)hal;
     }
     do {
         if (req.magic != SFWM_SF_MAGIC) {
@@ -371,6 +455,16 @@ static int serve_client(int sock)
     }
     if (status == 0 && buffer && p_send && p_send(buffer, sock) != 0) {
         // The client sees a short read and falls back.
+    }
+    if (status == 0 && buffer && cookie && g_cache_n < SFWM_SF_CACHE) {
+        g_cache[g_cache_n].cookie = cookie;
+        g_cache[g_cache_n].w = req.width;
+        g_cache[g_cache_n].h = req.height;
+        g_cache[g_cache_n].stride = req.stride;
+        g_cache[g_cache_n].hb = buffer;   // keep the reference, the cache owns it now
+        g_cache_n++;
+        if (fd >= 0) close(fd);
+        return 0;
     }
     if (buffer) p_release(buffer);
     if (fd >= 0) close(fd);
