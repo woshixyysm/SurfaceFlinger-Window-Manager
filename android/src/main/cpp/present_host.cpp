@@ -207,7 +207,13 @@ void draw_frame(Host *h, const int fds[4], const uint32_t native_fmt[4], int npl
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, h->tex);
     h->gl.ImageTargetTexture(GL_TEXTURE_2D, (GLeglImageOES)img);
-    glViewport(0, 0, h->w, h->h);
+    // The viewport follows the surface, not the frame: the quad already covers the whole
+    // surface and the texture is stretched onto it, so the client can render at any size.
+    const int vw = ANativeWindow_getWidth(h->win);
+    const int vh = ANativeWindow_getHeight(h->win);
+    h->w = vw;
+    h->h = vh;
+    glViewport(0, 0, vw, vh);
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
     static const float quad[] = {-1, -1, 1, -1, -1, 1, 1, 1};

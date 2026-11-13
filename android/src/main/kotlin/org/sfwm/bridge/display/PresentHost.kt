@@ -1,56 +1,40 @@
 package org.sfwm.bridge.display
 
-import android.view.SurfaceHolder
-import android.view.SurfaceView
+import android.view.Surface
 
 /**
  * Unprivileged presentation host.
  *
  * sfwm hands us dma-buf fds and we scan them out through a Surface we own, so nothing has to be
  * imported into SurfaceFlinger and no special privilege is involved.
+ *
+ * Deliberately a thin shim: it holds no lifecycle logic of its own. The owner of the Surface
+ * decides when to [start] and [stop], which keeps it usable from any window.
  */
 object PresentHost {
     init {
         System.loadLibrary("sfwmpresent")
     }
 
-    private var view: SurfaceView? = null
     private var started = false
 
-    private external fun nativeStart(surface: android.view.Surface?, width: Int, height: Int): Boolean
+    private external fun nativeStart(surface: Surface?, width: Int, height: Int): Boolean
     private external fun nativeStop()
 
-    /** Hands [sv] to the native side. Returns true when the socket is listening. */
-    fun attach(sv: SurfaceView): Boolean {
-        view = sv
-        val holder = sv.holder
-        if (holder.surface?.isValid == true) return startOn(holder)
-        holder.addCallback(object : SurfaceHolder.Callback {
-            override fun surfaceCreated(h: SurfaceHolder) {
-                startOn(h)
-            }
+    val isRunning: Boolean get() = started
 
-            override fun surfaceChanged(h: SurfaceHolder, format: Int, width: Int, height: Int) {
-                if (started) nativeStop()
-                startOn(h)
-            }
-
-            override fun surfaceDestroyed(h: SurfaceHolder) {
-                detach()
-            }
-        })
-        return true
-    }
-
-    private fun startOn(holder: SurfaceHolder): Boolean {
-        val s = holder.surface ?: return false
-        started = nativeStart(s, 0, 0)
+    /** Starts listening on `@sfwm-out` for the given surface. Returns true on success. */
+    fun start(surface: Surface?): Boolean {
+        if (started) nativeStop()
+        started = surface != null && surface.isValid && nativeStart(surface, 0, 0)
+        Logs.i("present host started=$started")
         return started
     }
 
-    fun detach() {
+    fun stop() {
         if (!started) return
         started = false
         nativeStop()
+        Logs.i("present host stopped")
     }
 }

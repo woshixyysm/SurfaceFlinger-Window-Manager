@@ -24,5 +24,17 @@
             android:launchMode="standard"
             android:theme="@android:style/Theme.Translucent.NoTitleBar"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode" />
+
+        <!-- Owns a full-screen Surface that the unprivileged presentation path renders into.
+             Exported for the same reason as the window above: the start comes from the shell's
+             process. It is not touchable and shows nothing of its own, so opening it only puts a
+             blank presenter on screen. -->
+        <activity
+            android:name=".display.PresentActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density|keyboard|keyboardHidden|navigation|uiMode" />
     </application>
 </manifest>
