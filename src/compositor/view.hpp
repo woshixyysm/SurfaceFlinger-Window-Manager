@@ -886,17 +886,20 @@ struct View {
                             fflush(stdout);
                         }
                         // ENOSYS means the cached Surface went stale (the layer was resized, eg.
-                        // when the client goes fullscreen). Clearing win makes the next frame
-                        // recreate the layer instead of stalling forever.
+                        // when the client goes fullscreen). Recreate it so the next frame gets
+                        // a usable window, but hide the old control first: dropping the
+                        // reference without hiding leaves it on screen as a ghost window that
+                        // keeps costing SurfaceFlinger a composition every frame.
                         if (lock_rc == -ENOSYS || deq_rc == -ENOSYS) {
                             static uint32_t last_recreate = 0;
                             if (t - last_recreate > 1000) {
                                 last_recreate = t;
-                                printf("[dmabuf] window went stale, recreating the layer\n");
+                                printf("[dmabuf] window went stale, hiding and recreating\n");
                                 fflush(stdout);
-                                layer.win = nullptr;
+                                layer.hide();
                                 layer.sc = nullptr;
                                 layer.surface = nullptr;
+                                layer.win = nullptr;
                                 layer.cap_w = 0;
                                 layer.cap_h = 0;
                             }
