@@ -9,10 +9,9 @@ flag. Unknown arguments are ignored.
 
 | option | default | meaning |
 |---|---|---|
-| `--size=WxH` | detected | physical size of the output. SurfaceFlinger layer capacity follows it. When omitted, the size is read from the current display rotation, so a rotated display needs no option. |
+| `--size=WxH` | `1272x2800` | physical size of the output. SurfaceFlinger layer capacity follows it. The default is a device reference value, not an automatic display query. Set it explicitly when the panel or output size differs. |
 | `--scale=N` | `3` | logical scale for the compositor's own UI and gestures. Clients are told the scale they render at through `wl_output` and fractional scale, not through this value. |
 | `--z=N` | `1000` | base z-order for content layers. Cursor and input method layers are placed relative to it. |
-| `--rotate=N` | auto | rotation of the output relative to the touch panel, in degrees (`90`, `180`, `270`). The kernel reports touch positions in panel coordinates whatever the display rotation is. A landscape output defaults to `90`; pass `--rotate=270` if touches land mirrored. |
 | `--socket=NAME` | `sfwm-0` | Wayland socket name, created in `XDG_RUNTIME_DIR` and made mode 0666. |
 | `--grab` | off | take the touch device with `EVIOCGRAB`, so Android does not also receive the same finger. |
 | `--clickthrough` | off | layers stop accepting input. Touches reach the Android UI below instead. Can be toggled at run time with `ct`. |
@@ -27,10 +26,12 @@ panel resolution.
 | variable | default | meaning |
 |---|---|---|
 | `SFWM_GL` | unset | `0` selects the CPU copy path instead of GPU composition |
+| `SFWM_DIRECT` | unset | experimental direct-buffer path through `ASurfaceControl`; unsupported formats fall back to GPU composition |
+| `SFWM_PRESENT_BRIDGE` | unset | sends frames to the app-owned presentation host packaged with the Android bridge; this is an alternate fallback path |
 | `SFWM_ZC` | on | `0` disables zero-copy output and reads the composite back with `glReadPixels` |
 | `SFWM_FPS` | `120` | frame callback cadence; `0` sends them immediately (uncapped clients) |
-| `SFWM_ASYNC` | unset | `1` puts the layer surface in async mode via the private swap-interval hook |
-| `SFWM_SF_HOOK` | unset | `1` has the optional KSU helper inside SurfaceFlinger import the client dma-buf, so the layer is a pure scanout of the client's buffer with no composite at all (see [android/ksu](../android/ksu/README.md)); unset it for multi-window use, and it falls back to the blit path whenever the helper is absent |
+| `SFWM_ASYNC` | unset | `1` calls the private `ANativeWindow` swap-interval hook to enable async BufferQueue mode and remove the dequeue/vsync wait |
+| `SFWM_SF_HOOK` | unset | `1` uses the optional KSU helper inside SurfaceFlinger to import the client dma-buf directly. This path is intended for a single fullscreen client. Leave it unset for normal multi-window composition (see [android/ksu](../android/ksu/README.md)) |
 | `SFWM_GL_FLIP` | auto | vertical flip for the GPU path, when an imported buffer arrives inverted |
 | `SFWM_GLDBG` | unset | log buffer geometry changes on the GPU path |
 | `SFWM_TESTPAT` | `0` | draw the self-test pattern over every frame |
