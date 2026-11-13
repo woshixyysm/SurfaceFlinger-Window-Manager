@@ -223,8 +223,8 @@ static void input_button(bool pressed) {
         if (!ptr_same_client(tr, v)) continue;
         if (pressed)
             wl_touch_send_down(tr, serial, t, v->surface, 0,
-                               wl_fixed_from_int((g_in.screen_x - v->x) / v->buf_scale),
-                               wl_fixed_from_int((g_in.screen_y - v->y) / v->buf_scale));
+                               wl_fixed_from_int(v->to_local_x(g_in.screen_x)),
+                               wl_fixed_from_int(v->to_local_y(g_in.screen_y)));
         else
             wl_touch_send_up(tr, serial, t, 0);
         if (wl_resource_get_version(tr) >= 5) wl_touch_send_frame(tr);
@@ -251,8 +251,8 @@ static void input_touch_motion() {
     uint32_t t = now_ms();
     for (wl_resource *tr : g_srv.touches) {
         wl_touch_send_motion(tr, t, 0,
-                            wl_fixed_from_int((g_in.screen_x - v->x) / v->buf_scale),
-                            wl_fixed_from_int((g_in.screen_y - v->y) / v->buf_scale));
+                            wl_fixed_from_int(v->to_local_x(g_in.screen_x)),
+                            wl_fixed_from_int(v->to_local_y(g_in.screen_y)));
         if (wl_resource_get_version(tr) >= 5) wl_touch_send_frame(tr);
     }
 }
