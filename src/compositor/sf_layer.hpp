@@ -295,6 +295,34 @@ public:
         get_surface_bridge(sc, reinterpret_cast<void *>(L.getSurface), &surface);
         if (!surface) { fprintf(stderr, "[sf] getSurface failed\n"); return false; }
         win = (ANativeWindow *)((char *)surface + 0x10);   // the ANativeWindow subobject is at +0x10
+        // The ANativeWindow subobject offset is layout-dependent. Probe it: a valid window
+        // answers getWidth with the layer width, a bogus one does not, and ANativeWindow_lock
+        // on a bogus one answers ENOSYS.
+        {
+            typedef int32_t (*Fn_w)(ANativeWindow *);
+            static Fn_w p_w = nullptr;
+            static int probe = -1;
+            if (probe < 0) {
+                void *nwl = dlopen("libnativewindow.so", RTLD_NOW | RTLD_GLOBAL);
+                p_w = (Fn_w)(nwl ? dlsym(nwl, "ANativeWindow_getWidth") : dlsym(RTLD_DEFAULT, "ANativeWindow_getWidth"));
+                probe = 0;
+                printf("[sf] win probe: nwl=%p getWidth=%p win=%p surface=%p\n", nwl, (void *)p_w,
+                       (void *)win, surface);
+                fflush(stdout);
+            }
+            if (p_w) {
+                const int32_t gw = p_w(win);
+                const char *off = getenv("SFWM_WIN_OFF0");
+                if (off && off[0] == '1' && gw != width) {
+                    win = (ANativeWindow *)surface;   // try the zero offset
+                    printf("[sf] win offset 0x10 rejected (getWidth=%d, want %u), using 0\n", gw,
+                           (unsigned)width);
+                } else {
+                    printf("[sf] win getWidth=%d (want %u)\n", gw, (unsigned)width);
+                }
+                fflush(stdout);
+            }
+        }
         // Asynchronous mode is what uncaps a launcher, but here SurfaceFlinger does not
         // always keep consuming when the producer stops waiting for vsync: the second
         // dequeueBuffer then blocks forever. Opt-in only.

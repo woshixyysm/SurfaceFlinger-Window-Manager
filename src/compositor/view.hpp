@@ -605,18 +605,48 @@ struct View {
                     // On by default; SFWM_ZC=0 falls back to the lock + glReadPixels path.
                     const char *zc_env = getenv("SFWM_ZC");
                     const bool zc_on = use_gl && !is_cursor && !(zc_env && zc_env[0] == '0');
+                    int deq_rc = -999;
+                    // The optional KSU helper needs no SurfaceFlinger buffer at all, so it has
+                    // to run before dequeueBuffer: BLAST paces dequeue to the display refresh
+                    // and, when it fails outright, would otherwise hide the fast path entirely.
+                    static const bool sfhook_first = getenv("SFWM_SF_HOOK") != nullptr;
+                    if (sfhook_first) {
+                        static int cap = -1;
+                        static uint32_t last = 0;
+                        if (cap < 0) {
+                            const char *e = getenv("SFWM_FPS");
+                            const int fps = e ? atoi(e) : 0;
+                            cap = fps > 0 ? fps : 165;
+                        }
+                        const uint32_t t = now_ms();
+                        if (!(last && t - last < (uint32_t)(1000 / cap))) {
+                            last = t;
+                            if (direct::present_via_sfhook(layer.win, db)) {
+                                if (getenv("SFWM_FRAMETIME") && (++frames % 60) == 0)
+                                    printf("[perf] sfhook %dx%d\n", db->w, db->h);
+                                sync_signal_release(this);
+                                wl_buffer_send_release(buffer);
+                                return;
+                            }
+                        }
+                    }
                     if (zc_on) {
                         typedef int (*Fn_deq)(ANativeWindow *, void **, int *);
                         typedef int (*Fn_queue)(ANativeWindow *, void *, int);
                         typedef int (*Fn_cancel)(ANativeWindow *, void *, int);
+                        // RTLD_DEFAULT resolves these to libandroid's implementations, which work
+                        // with this Surface; going through libnativewindow directly answered
+                        // ENOSYS for both dequeueBuffer and lock.
                         static Fn_deq p_deq = (Fn_deq)dlsym(RTLD_DEFAULT, "ANativeWindow_dequeueBuffer");
                         static Fn_queue p_queue = (Fn_queue)dlsym(RTLD_DEFAULT, "ANativeWindow_queueBuffer");
                         static Fn_cancel p_cancel = (Fn_cancel)dlsym(RTLD_DEFAULT, "ANativeWindow_cancelBuffer");
                         void *anwb = nullptr;
                         int facq = -1;
                         const uint32_t __tzc = now_ms();
-                        if (p_deq && p_queue && p_cancel &&
-                            p_deq(layer.win, &anwb, &facq) == 0 && anwb) {
+                        deq_rc = (p_deq && p_queue && p_cancel)
+                                               ? p_deq(layer.win, &anwb, &facq)
+                                               : -999;
+                        if (deq_rc == 0 && anwb) {
                             if (facq >= 0) {
                                 struct pollfd pf = {facq, POLLIN, 0};
                                 poll(&pf, 1, 100);
@@ -636,6 +666,24 @@ struct View {
                             // Optional: let the preloaded helper inside SurfaceFlinger do the
                             // import and return the buffer (see android/ksu).
                             static const bool sfhook_on = getenv("SFWM_SF_HOOK") != nullptr;
+                            // Cap how often we push transactions at SurfaceFlinger: an unpaced
+                            // setBuffer storm crashed it with SIGSEGV on a binder thread.
+                            if (sfhook_on) {
+                                static int cap = -1;
+                                static uint32_t last = 0;
+                                if (cap < 0) {
+                                    const char *e = getenv("SFWM_FPS");
+                                    const int fps = e ? atoi(e) : 0;
+                                    cap = fps > 0 ? fps : 165;
+                                }
+                                const uint32_t t = now_ms();
+                                if (last && t - last < (uint32_t)(1000 / cap)) {
+                                    sync_signal_release(this);
+                                    wl_buffer_send_release(buffer);
+                                    return;
+                                }
+                                last = t;
+                            }
                             if (sfhook_on && direct::present_via_sfhook(layer.win, db)) {
                                 p_cancel(layer.win, anwb, -1);
                                 if (getenv("SFWM_FRAMETIME") && (++frames % 60) == 0)
@@ -693,7 +741,8 @@ struct View {
 
                     ANativeWindow_Buffer ab;
                     const uint32_t __tlock = now_ms();
-                    if (ANativeWindow_lock(layer.win, &ab, nullptr) == 0) {
+                    const int lock_rc = ANativeWindow_lock(layer.win, &ab, nullptr);
+                    if (lock_rc == 0) {
                         // ---- GPU composition path (default)
                         // The client dmabuf never reaches the CPU: EGLImage to GL texture,
                         // drawn over the whole SF buffer, then read back into ab.bits. Every
@@ -827,8 +876,32 @@ struct View {
                         if ((++frames % 30) == 1)
                             printf("[sfwm] '%s' dmabuf frame %d %dx%d\n",
                                    title[0] ? title : "view", frames, db->w, db->h);
-                    } else
-                        printf("[dmabuf] lock failed\n");
+                    } else {
+                        static uint32_t last_lock_log = 0;
+                        const uint32_t t = now_ms();
+                        if (t - last_lock_log > 1000) {
+                            last_lock_log = t;
+                            printf("[dmabuf] lock failed rc=%d deq=%d cursor=%d\n", lock_rc,
+                                   deq_rc, (int)is_cursor);
+                            fflush(stdout);
+                        }
+                        // ENOSYS means the cached Surface went stale (the layer was resized, eg.
+                        // when the client goes fullscreen). Clearing win makes the next frame
+                        // recreate the layer instead of stalling forever.
+                        if (lock_rc == -ENOSYS || deq_rc == -ENOSYS) {
+                            static uint32_t last_recreate = 0;
+                            if (t - last_recreate > 1000) {
+                                last_recreate = t;
+                                printf("[dmabuf] window went stale, recreating the layer\n");
+                                fflush(stdout);
+                                layer.win = nullptr;
+                                layer.sc = nullptr;
+                                layer.surface = nullptr;
+                                layer.cap_w = 0;
+                                layer.cap_h = 0;
+                            }
+                        }
+                    }
 
                     ds.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
                     ioctl(db->fds[0], DMA_BUF_IOCTL_SYNC, &ds);
