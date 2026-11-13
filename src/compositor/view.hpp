@@ -600,6 +600,18 @@ struct View {
                         return;
                     }
 
+                    // Unprivileged presentation: the fd goes to a process that owns a
+                    // Surface and scans it out itself. No dequeue happens here, so this is
+                    // paced by that app's buffer queue instead of by vsync.
+                    static const bool bridge_on = getenv("SFWM_PRESENT_BRIDGE") != nullptr;
+                    if (bridge_on && !is_cursor && direct::present_via_bridge(db)) {
+                        if (getenv("SFWM_FRAMETIME") && (++frames % 60) == 0)
+                            printf("[perf] bridge %dx%d\n", db->w, db->h);
+                        sync_signal_release(this);
+                        wl_buffer_send_release(buffer);
+                        return;
+                    }
+
                     // Zero-copy output: composite directly into the SurfaceFlinger
                     // buffer's dmabuf instead of locking it and reading pixels back.
                     // On by default; SFWM_ZC=0 falls back to the lock + glReadPixels path.
