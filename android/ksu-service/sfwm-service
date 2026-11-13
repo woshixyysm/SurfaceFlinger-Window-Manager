@@ -1,0 +1,127 @@
+#!/system/bin/sh
+# sfwm-service - control the sfwm compositor as a service.
+#
+#   sfwm-service start | stop | restart | status | config
+#
+# Deliberately independent of Termux's data directory: PMS has cleared it on this device more
+# than once. Configuration and runtime both live outside it (module dir and /dev/sfwm).
+
+SELF=$(readlink -f "$0" 2>/dev/null || echo "$0")
+HERE=$(dirname "$SELF")
+for c in "$HERE/config.sh" /data/adb/modules/sfwm-service/config.sh; do
+    [ -f "$c" ] && . "$c" && break
+done
+
+RUN=${SFWM_RUN:-/dev/sfwm}
+UID_=${SFWM_UID:-10391}
+BIN=${SFWM_BIN:-/data/data/com.termux/files/home/lg/sfwm/sfwm}
+PREFIX=${SFWM_PREFIX:-/data/data/com.termux/files/usr}
+LOG=${SFWM_LOG:-$RUN/sfwm.log}
+SOCK=$RUN/sfwm-0
+
+PRELOAD="/data/local/tmp/libeglcompat.so /data/local/tmp/libfdshim.so \
+/system/lib64/libnativewindow.so /system/lib64/libbinder_ndk.so /system/lib64/liblzma.so"
+
+# The launcher receives its environment through a file rather than the command line: su drops
+# most variables and an env list long enough to hold all of these would be fragile anyway.
+write_env() {
+    cat >"$RUN/env" <<EOF
+export HOME=/data/data/com.termux/files/home
+export XDG_RUNTIME_DIR=$RUN
+export PATH=$PREFIX/bin:/system/bin
+export TMPDIR=$RUN
+export LD_LIBRARY_PATH=$PREFIX/lib
+export LD_PRELOAD="$PRELOAD"
+export SFWM_LIBEGL=$PREFIX/lib/libEGL.so.1
+export SFWM_DRM_DEVICE=/dev/dri/renderD128
+export MESA_LOADER_DRIVER_OVERRIDE=msm
+export LIBGL_DRIVERS_PATH=$PREFIX/lib/dri
+export SFWM_ZC=${SFWM_ZC:-1}
+export SFWM_ASYNC=${SFWM_ASYNC:-1}
+export SFWM_FPS=${SFWM_FPS:-165}
+export SFWM_FRAMETIME=1
+export SFWM_REFRESH=1
+export SFWM_CURSOR=${SFWM_CURSOR:-1}
+export XCURSOR_THEME="$XCURSOR_THEME"
+export XCURSOR_SIZE=${XCURSOR_SIZE:-32}
+export XCURSOR_PATH="$XCURSOR_PATH"
+EOF
+    chmod 0600 "$RUN/env"
+}
+
+prepare() {
+    mkdir -p "$RUN"
+    chown "$UID_:$UID_" "$RUN" 2>/dev/null
+    chmod 0711 "$RUN" 2>/dev/null
+    write_env
+    rm -f "$SOCK" "$SOCK.lock" "$RUN/wayland-0"
+}
+
+start() {
+    if pidof sfwm >/dev/null 2>&1; then
+        echo "already running: $(pidof sfwm)"
+        return 0
+    fi
+    [ -x "$BIN" ] || { echo "missing binary: $BIN"; return 1; }
+
+    prepare
+    # cf. ctxfix: a binary living in Termux's data dir carries the wrong label and the
+    # SurfaceComposerClient calls fail with EPERM without this.
+    [ -x "$PREFIX/bin/ctxfix" ] &&
+        "$PREFIX/bin/ctxfix" -u "$UID_" --mode 755 "$BIN" >/dev/null 2>&1
+
+    : >"$LOG"
+    sh "$RUN/env"
+    setsid "$BIN" $SFWM_ARGS --scale="$SFWM_SCALE" \
+        >>"$LOG" 2>&1 </dev/null &
+    echo $! >"$RUN/pid"
+
+    i=0
+    while [ ! -S "$SOCK" ] && [ $i -lt 40 ]; do
+        sleep 0.5
+        i=$((i + 1))
+    done
+    ln -sf sfwm-0 "$RUN/wayland-0"
+    if [ -S "$SOCK" ]; then
+        chown "$UID_:$UID_" "$SOCK" 2>/dev/null
+        chmod 0770 "$SOCK" 2>/dev/null
+        chcon u:object_r:shell_data_file:s0 "$SOCK" 2>/dev/null
+        echo "started: $(pidof sfwm) socket $SOCK"
+    else
+        echo "started but no socket; last lines:"
+        tail -5 "$LOG"
+        return 1
+    fi
+}
+
+stop() {
+    for p in $(pidof sfwm); do kill "$p"; done
+    sleep 1
+    for p in $(pidof sfwm); do kill -9 "$p"; done
+    rm -f "$SOCK" "$SOCK.lock" "$RUN/wayland-0" "$RUN/pid"
+    echo "stopped"
+}
+
+status() {
+    echo "run dir:   $RUN"
+    p=$(pidof sfwm)
+    if [ -n "$p" ]; then
+        echo "sfwm:      $p  up $(ps -o etime= -p "$p" 2>/dev/null)"
+    else
+        echo "sfwm:      (not running)"
+    fi
+    echo "socket:    $([ -S "$SOCK" ] && echo "$SOCK" || echo absent)"
+    echo "surface:   $(pidof surfaceflinger)"
+    echo "selinux:   $(getenforce)"
+    echo "refresh:   $(dumpsys SurfaceFlinger 2>/dev/null | grep -m1 -o 'vsyncRate[= ][0-9.]*')"
+    [ -f "$LOG" ] && { echo "--- log"; tail -3 "$LOG"; }
+}
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart) stop; sleep 1; start ;;
+    status) status ;;
+    config) . "${HERE}/config.sh" 2>/dev/null; cat "${HERE}/config.sh" ;;
+    *) echo "usage: sfwm-service {start|stop|restart|status|config}"; exit 2 ;;
+esac
