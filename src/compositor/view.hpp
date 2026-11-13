@@ -59,24 +59,6 @@ static void frame_cb_gone(wl_listener *l, void *) {
 }
 
 // Declared after struct View, which holds the callback it consumes.
-// Both hook modes push transactions at SurfaceFlinger. Anything that renders faster than
-// the panel will flood it — that crashed surfaceflinger outright (SIGSEGV on a binder
-// thread), so presentation is paced here and surplus frames are dropped (the client still
-// gets its buffer back and keeps rendering at its own rate).
-static bool hook_pace_ok() {
-    static int cap = -1;
-    static uint32_t last = 0;
-    if (cap < 0) {
-        const char *e = getenv("SFWM_FPS");
-        const int fps = e ? atoi(e) : 0;
-        cap = fps > 0 ? fps : 165;
-    }
-    const uint32_t t = now_ms();
-    if (last && t - last < (uint32_t)(1000 / cap)) return false;
-    last = t;
-    return true;
-}
-
 static void frame_defer(View *v);
 
 // Once per refresh: release the queued frame callbacks and re-arm the timer. The timer
@@ -624,79 +606,6 @@ struct View {
                     const char *zc_env = getenv("SFWM_ZC");
                     const bool zc_on = use_gl && !is_cursor && !(zc_env && zc_env[0] == '0');
                     if (zc_on) {
-                        // The optional KSU helper path needs no SurfaceFlinger buffer at all,
-                        // so it must run before dequeueBuffer: BLAST paces dequeue to the
-                        // display refresh, which capped every client at the panel rate.
-                        static const char *hook_env = getenv("SFWM_SF_HOOK");
-                        static const bool sfhook_on = hook_env != nullptr;
-                        static const bool sfpool_on = hook_env && hook_env[0] == '2';
-                        static int g_pool_next = 0;
-                        if (sfhook_on && !hook_pace_ok()) {
-                            sync_signal_release(this);
-                            wl_buffer_send_release(buffer);
-                            return;
-                        }
-                        if (sfpool_on) {
-                            // Pool mode: SurfaceFlinger owns the buffers, we render into them
-                            // and hand them back. One GPU blit, no per-frame IPC.
-                            const uint32_t pfcc =
-                                db->drm_format == 0x34324241u || db->drm_format == 0x34324258u
-                                    ? 0x34324241u   // ABGR8888 -> HAL RGBA_8888
-                                    : 0x34325241u;  // otherwise  -> HAL BGRA_8888
-                            if (direct::sf_pool_ensure(g_out_w, g_out_h, pfcc)) {
-                                direct::SfPool &pl = direct::sf_pool();
-                                const int idx = g_pool_next++ % pl.n;
-                                if (glc::draw_to_dmabuf(
-                                        db->fds[0], db->w, db->h, db->drm_format, db->stride[0],
-                                        db->offset[0], db->modifier, pl.fd[idx], (uint32_t)pl.w,
-                                        (uint32_t)pl.h, pfcc, (uint32_t)pl.stride_bytes[idx], 0u,
-                                        0ull, (int)db->w, (int)db->h, !is_cursor) &&
-                                    (getenv("SFWM_SF_POOL_ATTACH")
-                                         ? direct::present_attach(direct::api(), layer.win, db,
-                                                                  pl.hb[idx], g_out_w, g_out_h)
-                                         : direct::sf_pool_present(layer.win, idx, -1, g_out_w,
-                                                                   g_out_h))) {
-                                    static bool checked = false;
-                                    if (!checked) {
-                                        checked = true;
-                                        unsigned char px[4] = {0, 0, 0, 0};
-                                        glc::A.ReadPixels(pl.w / 2, pl.h / 2, 1, 1, glc::GL_RGBA_,
-                                                          glc::GL_UNSIGNED_BYTE_, px);
-                                        printf("[direct] pool readback rgba=%02x%02x%02x%02x\n",
-                                               px[0], px[1], px[2], px[3]);
-                                        fflush(stdout);
-                                    }
-                                    if (getenv("SFWM_FRAMETIME") && (++frames % 60) == 0) {
-                                        static uint32_t last = 0;
-                                        const uint32_t t = now_ms();
-                                        if (last)
-                                            printf("[perf] sfpool %dx%d | %.1f fps\n", db->w,
-                                                   db->h, 60000.0 / (double)(t - last));
-                                        last = t;
-                                        fflush(stdout);
-                                    }
-                                    sync_signal_release(this);
-                                    wl_buffer_send_release(buffer);
-                                    return;
-                                }
-                            }
-                        }
-                        if (sfhook_on && !sfpool_on &&
-                            direct::present_via_sfhook(layer.win, db, (uint64_t)(uintptr_t)buffer, g_out_w, g_out_h)) {
-                            if (getenv("SFWM_FRAMETIME") && (++frames % 60) == 0) {
-                                static uint32_t last_ms = 0;
-                                const uint32_t t = now_ms();
-                                if (last_ms)
-                                    printf("[perf] sfhook %dx%d -> sf %dx%d | %.1f fps\n", db->w,
-                                           db->h, g_out_w, g_out_h,
-                                           60000.0 / (double)(t - last_ms));
-                                last_ms = t;
-                                fflush(stdout);
-                            }
-                            sync_signal_release(this);
-                            wl_buffer_send_release(buffer);
-                            return;
-                        }
                         typedef int (*Fn_deq)(ANativeWindow *, void **, int *);
                         typedef int (*Fn_queue)(ANativeWindow *, void *, int);
                         typedef int (*Fn_cancel)(ANativeWindow *, void *, int);
@@ -724,6 +633,18 @@ struct View {
                             // HAL_PIXEL_FORMAT_RGBA_8888 (1) is DRM_FORMAT_ABGR8888,
                             // HAL_PIXEL_FORMAT_BGRA_8888 (5) is DRM_FORMAT_ARGB8888.
                             const uint32_t dfourcc = w32[17] == 1 ? 0x34324241u : 0x34325241u;
+                            // Optional: let the preloaded helper inside SurfaceFlinger do the
+                            // import and return the buffer (see android/ksu).
+                            static const bool sfhook_on = getenv("SFWM_SF_HOOK") != nullptr;
+                            if (sfhook_on && direct::present_via_sfhook(layer.win, db)) {
+                                p_cancel(layer.win, anwb, -1);
+                                if (getenv("SFWM_FRAMETIME") && (++frames % 60) == 0)
+                                    printf("[perf] sfhook %dx%d -> sf %dx%d %u ms\n",
+                                           db->w, db->h, dw, dh, now_ms() - __tzc);
+                                sync_signal_release(this);
+                                wl_buffer_send_release(buffer);
+                                return;
+                            }
 
                             // Direct scanout, shaped-handle variant: wrap the client dmabuf in a
                             // handle cloned from a real SurfaceFlinger one and let SurfaceFlinger
