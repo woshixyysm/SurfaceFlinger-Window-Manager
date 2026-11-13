@@ -119,6 +119,12 @@ if (-not (Test-Path $ndkClang)) { Fail "clang++ missing in $ndk" }
 
 $nativeDir = Join-Path $build "native"
 New-Item -ItemType Directory -Force $nativeDir | Out-Null
+$presentLib = Join-Path $nativeDir "libsfwmpresent.so"
+& $ndkClang --target=aarch64-linux-android29 -shared -fPIC -O2 `
+    -o $presentLib (Join-Path $root "src\main\cpp\present_host.cpp") `
+    -llog -landroid -lEGL -lGLESv2 -ljnigraphics
+if (-not (Test-Path $presentLib)) { Fail "present_host build failed" }
+
 $nativeLib = Join-Path $nativeDir "libsfwmsprite.so"
 & $ndkClang --target=aarch64-linux-android29 -shared -fPIC -O2 -fno-exceptions `
     -static-libstdc++ -o $nativeLib (Join-Path $root "src\main\cpp\sprite_host.cpp") -llog
@@ -160,7 +166,8 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $stored = @("resources.arsc", "AndroidManifest.xml")
 $extra = @(
     @{ Path = (Join-Path $dexDir "classes.dex"); Entry = "classes.dex" },
-    @{ Path = $nativeLib; Entry = "lib/arm64-v8a/libsfwmsprite.so" }
+    @{ Path = $nativeLib; Entry = "lib/arm64-v8a/libsfwmsprite.so" },
+    @{ Path = $presentLib; Entry = "lib/arm64-v8a/libsfwmpresent.so" }
 )
 foreach ($name in "java_init.list", "module.prop", "scope.list") {
     $extra += @{ Path = (Join-Path $metaDir $name); Entry = "META-INF/xposed/$name" }
