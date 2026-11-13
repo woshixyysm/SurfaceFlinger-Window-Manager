@@ -544,8 +544,15 @@ inline bool present_via_sfhook(ANativeWindow *win, const DmabufBuf *db) {
         return false;
     }
 
+    // Re-derive the control whenever the window changes: after a layer recreate the previous
+    // ASurfaceControl is destroyed, and pushing a transaction at it crashed surfaceflinger
+    // with SIGSEGV.
     static ASurfaceControl *asc = nullptr;
-    if (!asc) asc = a.ascFromWindow(win);
+    static ANativeWindow *asc_win = nullptr;
+    if (!asc || asc_win != win) {
+        asc = a.ascFromWindow(win);
+        asc_win = win;
+    }
     if (!asc) {
         a.hbRelease(hb);
         return false;
