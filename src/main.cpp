@@ -71,68 +71,22 @@
 #include "protocol/foreign_toplevel_mgr.hpp"
 
 // ---------------------------------------------------------------- main
-// ---------------------------------------------------------------- display size
-// screencap prints the display size in its current rotation as the first two uint32
-// values of its output, before the pixels. It is the only size query that follows the
-// rotation: `wm size` reports the panel, not the rotated display.
-static bool detect_display_size(int32_t *w, int32_t *h) {
-    // LD_PRELOAD holds libfdshim and libeglcompat for the compositor; a child that inherits
-    // them crashes (screencap segfaults before writing its header), so clear it first.
-    FILE *p = popen("/system/bin/env -u LD_PRELOAD -u LD_LIBRARY_PATH "
-                    "/system/bin/screencap 2>/dev/null", "r");
-    if (!p) {
-        printf("[sfwm] screencap: %s\n", strerror(errno));
-        return false;
-    }
-    uint32_t hdr[2] = {0, 0};
-    const size_t n = fread(hdr, sizeof(uint32_t), 2, p);
-    pclose(p);
-    if (n != 2) {
-        printf("[sfwm] screencap header gave %zu words\n", n);
-        return false;
-    }
-    const int32_t dw = (int32_t)hdr[0], dh = (int32_t)hdr[1];
-    if (dw < 200 || dh < 200 || dw > 20000 || dh > 20000) return false;
-    *w = dw;
-    *h = dh;
-    return true;
-}
-
 int main(int argc, char **argv) {
     // Line buffering, so a crash does not cut the tail of the log when stdout is a file.
     setvbuf(stdout, nullptr, _IOLBF, 0);
     setvbuf(stderr, nullptr, _IOLBF, 0);
     setvbuf(stdout, NULL, _IONBF, 0);
-    bool size_given = false, rotate_given = false;
     for (int i = 1; i < argc; i++) {
-        if (!strncmp(argv[i], "--size=", 7)) { sscanf(argv[i] + 7, "%dx%d", &g_out_w, &g_out_h); size_given = true; }
+        if (!strncmp(argv[i], "--size=", 7)) sscanf(argv[i] + 7, "%dx%d", &g_out_w, &g_out_h);
         else if (!strncmp(argv[i], "--z=", 4)) g_base_z = atoi(argv[i] + 4);
         else if (!strncmp(argv[i], "--socket=", 9)) g_socket = argv[i] + 9;
         else if (!strncmp(argv[i], "--scale=", 8)) g_scale = atoi(argv[i] + 8);
-        else if (!strncmp(argv[i], "--rotate=", 9)) { g_rotate = ((atoi(argv[i] + 9) % 360) + 360) % 360; rotate_given = true; }
         else if (!strcmp(argv[i], "--grab")) g_grab = true;
         else if (!strcmp(argv[i], "--clickthrough")) g_clickthrough = true;
         else if (!strcmp(argv[i], "--touch")) g_touch_enabled = true;
     }
-    if (!size_given) {
-        int32_t dw = g_out_w, dh = g_out_h;
-        if (detect_display_size(&dw, &dh)) {
-            g_out_w = dw;
-            g_out_h = dh;
-            printf("[sfwm] detected display %dx%d\n", dw, dh);
-        } else {
-            printf("[sfwm] display size detection failed, keeping %dx%d\n", g_out_w, g_out_h);
-        }
-    }
-    // A landscape output over a portrait panel needs the touch panel's axes rotated. 90
-    // is the rotation the display uses when the device is turned counter-clockwise;
-    // --rotate=270 covers the other direction.
-    if (!rotate_given && g_out_w > g_out_h) {
-        g_rotate = 90;
-        printf("[sfwm] landscape output, assuming touch rotation 90 (override with --rotate=270)\n");
-    }
-    printf("[sfwm] output %dx%d (logical %dx%d), scale=%d, base_z=%d, rotate=%d, socket=%s\n",
-           g_out_w, g_out_h, g_out_w / g_scale, g_out_h / g_scale, g_scale, g_base_z, g_rotate, g_socket);
+    printf("[sfwm] output %dx%d (logical %dx%d), scale=%d, base_z=%d, socket=%s\n",
+           g_out_w, g_out_h, g_out_w / g_scale, g_out_h / g_scale, g_scale, g_base_z, g_socket);
 
     sf::Lib &L = sf::Lib::get();
     if (!L.ok) { fprintf(stderr, "[sfwm] libgui initialisation failed\n"); return 1; }

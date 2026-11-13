@@ -261,21 +261,13 @@ static void raw_to_screen(int32_t rx, int32_t ry, int32_t *sx, int32_t *sy) {
     int32_t w = g_in.xmax - g_in.xmin, h = g_in.ymax - g_in.ymin;
     if (w <= 0) w = 1;
     if (h <= 0) h = 1;
-    const int32_t px = rx - g_in.xmin, py = ry - g_in.ymin;
-    int64_t x, y;
-    switch (g_rotate) {
-    // Clockwise rotation of the panel: the panel's y axis runs along the screen's x axis,
-    // and the panel's x axis runs against the screen's y axis.
-    case 90:  x = (int64_t)py * g_out_w / h;          y = (int64_t)(w - px) * g_out_h / w; break;
-    case 180: x = (int64_t)(w - px) * g_out_w / w;    y = (int64_t)(h - py) * g_out_h / h; break;
-    case 270: x = (int64_t)(h - py) * g_out_w / h;    y = (int64_t)px * g_out_h / w;       break;
-    default:  x = (int64_t)px * g_out_w / w;          y = (int64_t)py * g_out_h / h;       break;
-    }
+    int32_t x = (int32_t)((int64_t)(rx - g_in.xmin) * g_out_w / w);
+    int32_t y = (int32_t)((int64_t)(ry - g_in.ymin) * g_out_h / h);
     if (x < 0) x = 0;
     if (y < 0) y = 0;
     if (x >= g_out_w) x = g_out_w - 1;
     if (y >= g_out_h) y = g_out_h - 1;
-    *sx = (int32_t)x; *sy = (int32_t)y;
+    *sx = x; *sy = y;
 }
 
 // Do not send a configure on every frame while dragging an edge or pinching: each one

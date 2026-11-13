@@ -11,11 +11,6 @@
 // ------------------------------------------------------------- configuration
 static int32_t g_out_w = 1272, g_out_h = 2800;
 static int32_t g_base_z = 1000;
-// Rotation of the output relative to the touch panel's native orientation, in degrees
-// (0, 90, 180, 270). The kernel reports touch positions in panel coordinates whatever the
-// display rotation is, so a rotated output needs the axes swapped and/or flipped when they
-// are converted to screen coordinates.
-static int32_t g_rotate = 0;
 // Click-through: our layers stop receiving touches, which reach the Android UI below.
 static bool g_clickthrough = false;
 // Set while dragging, to detect whether the client keeps redrawing.

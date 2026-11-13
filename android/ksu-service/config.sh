@@ -19,7 +19,10 @@ SFWM_SCALE="${SFWM_SCALE:-1}"
 SFWM_FPS="${SFWM_FPS:-165}"
 SFWM_ASYNC="${SFWM_ASYNC:-1}"
 SFWM_ZC="${SFWM_ZC:-1}"
-SFWM_ARGS="${SFWM_ARGS:---z=1000000 --grab}"
+# No --grab: taking the panel exclusively stops inputflinger from seeing anything at all,
+# so Android windows and the launcher would go dead. The compositor reads the device on its
+# own and the layers stay out of input handling, which lets both paths work at once.
+SFWM_ARGS="${SFWM_ARGS:---z=1000000}"
 
 # Idle exit is off by default: with the module enabled the intent is a service that is always
 # there. Set to a number of seconds to have it stop itself when no client has been connected
