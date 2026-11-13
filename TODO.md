@@ -5,10 +5,10 @@ intentionally grouped by status; this is a working roadmap, not a release schedu
 
 ## Bugs
 
-- [ ] **Android activity updates can make sfwm layers flicker.** Reproduce while an Android
-  activity is refreshed, resumed, paused or otherwise updated beneath/alongside sfwm layers.
-  Trace SurfaceFlinger layer state, visibility, z-order and transaction timing before choosing
-  a fix. Root cause is not established.
+- [ ] **sfwm layers flicker when Android activities update.** The reported symptom is that
+  layers drawn by sfwm flicker when an Android activity updates underneath them. Reproduce
+  the exact transition and trace SurfaceFlinger layer state, visibility, z-order and transaction
+  timing before choosing a fix. Root cause is not established.
 - [ ] **Hosted Android window lifecycle.** Verify that activity and virtual-display teardown,
   recreation and relaunch leave no stale overlay windows, slots or layer state.
 
