@@ -1,0 +1,10 @@
+#!/system/bin/sh
+# /system/bin/sfwm - the compositor as a system binary.
+#
+# Sources the environment that sfwm-service prepared and hands straight over to the real
+# executable, so this wrapper costs nothing at runtime and rebuilding sfwm in Termux needs no
+# reinstalling of the module.
+RUN=${SFWM_RUN:-/dev/sfwm}
+[ -f "$RUN/env" ] && . "$RUN/env"
+BIN=${SFWM_BIN:-/data/data/com.termux/files/home/lg/sfwm/sfwm}
+exec "$BIN" "$@"

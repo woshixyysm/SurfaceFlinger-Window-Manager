@@ -21,7 +21,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
 #include <sys/socket.h>
+#include <sys/un.h>
+#include <sys/uio.h>
+#include <unistd.h>
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -585,6 +589,90 @@ inline bool present_via_sfhook(ANativeWindow *win, const DmabufBuf *db) {
     a.hbRelease(hb);
     static int once = 0;
     if (!once++) printf("[direct] sf-hook import ok, scanout without compositing\n");
+    return true;
+}
+
+// ---- unprivileged presentation
+//
+// Instead of forcing the buffer into SurfaceFlinger we only move its fd. A separate process
+// that owns a Surface (our LSPosed module inside SystemUI) turns it into an EGL window
+// surface and scans the buffer out itself, so nothing here needs a privilege and the vendor
+// import limits stop mattering.
+static const uint32_t BRIDGE_MAGIC = 0x5346574Fu;   // 'SFWO'
+static const char *BRIDGE_SOCKET = "sfwm-out";
+
+inline int &bridge_slot() {
+    static int fd = -1;
+    return fd;
+}
+
+inline int bridge_connect() {
+    int &slot = bridge_slot();
+    if (slot >= 0) return slot;
+    const int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (s < 0) return -1;
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof addr);
+    addr.sun_family = AF_UNIX;
+    const size_t n = strlen(BRIDGE_SOCKET);
+    memcpy(addr.sun_path + 1, BRIDGE_SOCKET, n);
+    if (connect(s, (struct sockaddr *)&addr,
+                (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + n)) != 0) {
+        close(s);
+        return -1;
+    }
+    slot = s;
+    printf("[direct] presenting through an app-owned surface\n");
+    return slot;
+}
+
+inline void bridge_drop() {
+    int &slot = bridge_slot();
+    if (slot >= 0) close(slot);
+    slot = -1;
+}
+
+// Returns false when no host is listening, so the caller can fall back.
+inline bool present_via_bridge(const DmabufBuf *db) {
+    if (!db || db->nplanes < 1 || db->fds[0] < 0 || db->w <= 0 || db->h <= 0) return false;
+    const int slot = bridge_connect();
+    if (slot < 0) return false;
+
+    uint32_t hdr[5] = {BRIDGE_MAGIC, (uint32_t)db->w, (uint32_t)db->h, db->drm_format,
+                       db->stride[0]};
+    struct iovec iov;
+    iov.iov_base = hdr;
+    iov.iov_len = sizeof hdr;
+    char ctl[CMSG_SPACE(sizeof(int))];
+    memset(ctl, 0, sizeof ctl);
+    struct msghdr msg;
+    memset(&msg, 0, sizeof msg);
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = ctl;
+    msg.msg_controllen = sizeof ctl;
+    struct cmsghdr *c = CMSG_FIRSTHDR(&msg);
+    c->cmsg_level = SOL_SOCKET;
+    c->cmsg_type = SCM_RIGHTS;
+    c->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(c), &db->fds[0], sizeof(int));
+
+    if (sendmsg(slot, &msg, MSG_NOSIGNAL) != (ssize_t)sizeof hdr) {
+        bridge_drop();
+        return false;
+    }
+    int32_t status = -1;
+    if (recv(slot, &status, sizeof status, 0) != (ssize_t)sizeof status) {
+        bridge_drop();
+        return false;
+    }
+    if (status != 0) {
+        static int warned = 0;
+        if (!warned++) printf("[direct] host rejected the frame: %d\n", status);
+        return false;
+    }
+    static int once = 0;
+    if (!once++) printf("[direct] presenting via an app-owned surface\n");
     return true;
 }
 

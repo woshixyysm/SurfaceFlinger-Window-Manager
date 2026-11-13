@@ -1,0 +1,6 @@
+id=sfwm-service
+name=sfwm Service
+version=v1.0
+versionCode=1
+author=sfwm
+description=Exposes sfwm as a system service: /system/bin/sfwm, sfwm-service and sfwmctl. Optional; disable or remove the module and nothing is left behind. Configure in config.sh.
