@@ -435,7 +435,32 @@ static void cursor_from_touch(void) { g_cur_touch_only = true; }
 static void cursor_from_pointer(void) { g_cur_touch_only = false; }
 static void cursor_hide(void);
 
+// SFWM_CURSOR=0 hides the cursor outright. The marker file is what makes it a runtime switch:
+// the keys socket and env are both fixed for the life of the process, but a file is not, so
+// `sfwmctl cursor off` only has to create or remove it. Checked every 32 frames, which is
+// often enough to feel immediate and rare enough to cost nothing.
+static bool cursor_disabled(void) {
+    static int tick = 0;
+    static bool off = false;
+    if ((tick++ % 32) == 0) {
+        bool marker = false;
+        const char *dir = getenv("XDG_RUNTIME_DIR");
+        if (dir && dir[0]) {
+            char path[256];
+            snprintf(path, sizeof path, "%s/cursor-off", dir);
+            marker = access(path, F_OK) == 0;
+        }
+        const char *e = getenv("SFWM_CURSOR");
+        off = marker || (e && e[0] == '0');
+    }
+    return off;
+}
+
 static void cursor_present(void) {
+    if (cursor_disabled()) {
+        cursor_hide();
+        return;
+    }
     // A finger is not a pointer: it has nothing to point with, so a cursor is only drawn for
     // a real mouse or touchpad. The flag is cleared as soon as one moves, so plugging a mouse
     // in brings the cursor back without any other change.

@@ -52,7 +52,7 @@ EOF
 prepare() {
     mkdir -p "$RUN"
     chown "$UID_:$UID_" "$RUN" 2>/dev/null
-    chmod 0711 "$RUN" 2>/dev/null
+    chmod 0777 "$RUN" 2>/dev/null
     write_env
     rm -f "$SOCK" "$SOCK.lock" "$RUN/wayland-0"
 }
@@ -71,7 +71,9 @@ start() {
         "$PREFIX/bin/ctxfix" -u "$UID_" --mode 755 "$BIN" >/dev/null 2>&1
 
     : >"$LOG"
-    sh "$RUN/env"
+    # Sourcing, not `sh "$RUN/env"`: running it as a script exports into a child shell that
+    # exits immediately, so the compositor inherited none of it and never saw the runtime dir.
+    . "$RUN/env"
     setsid "$BIN" $SFWM_ARGS --scale="$SFWM_SCALE" \
         >>"$LOG" 2>&1 </dev/null &
     echo $! >"$RUN/pid"

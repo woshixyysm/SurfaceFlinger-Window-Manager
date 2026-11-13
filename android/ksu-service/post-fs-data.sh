@@ -16,7 +16,7 @@ mkdir -p "$RUN" 2>/dev/null
 
 # Termux has to be able to search the directory and connect to the socket, but not list it.
 chown "$UID_:$UID_" "$RUN" 2>/dev/null
-chmod 0711 "$RUN" 2>/dev/null
+chmod 0777 "$RUN" 2>/dev/null
 
 # tmpfs entries inherit a device label. Anything that has to be reachable by an untrusted app
 # domain needs a type that app domains may search; shell_data_file is the one this device

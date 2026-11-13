@@ -284,6 +284,42 @@ int cmd_shot(int argc, char **argv) {
     return exists(out) ? 0 : 1;
 }
 
+int cmd_cursor(int argc, char **argv) {
+    if (argc < 1 || (strcmp(argv[0], "on") && strcmp(argv[0], "off"))) {
+        say("usage: sfwmctl cursor {on|off}");
+        return 2;
+    }
+    // The compositor polls a marker file, so the toggle needs nothing but a touch or unlink.
+    // Find whichever runtime directory the running compositor is actually using.
+    std::string dir;
+    const char *env = getenv("SFWM_RUN");
+    if (env && *env) dir = env;
+    if (dir.empty() || !exists(dir + "/sfwm-0")) {
+        const char *cands[] = {"/dev/sfwm", "/data/local/tmp/sfwm-xdg", nullptr};
+        for (int i = 0; cands[i]; ++i) {
+            if (exists(std::string(cands[i]) + "/sfwm-0")) {
+                dir = cands[i];
+                break;
+            }
+        }
+    }
+    if (dir.empty()) {
+        say("no running compositor found");
+        return 1;
+    }
+    const std::string marker = dir + "/cursor-off";
+    if (!strcmp(argv[0], "off")) {
+        const int fd = open(marker.c_str(), O_CREAT | O_WRONLY, 0644);
+        if (fd < 0) { perror("touch"); return 1; }
+        close(fd);
+        say("cursor hidden (%s)", marker.c_str());
+    } else {
+        unlink(marker.c_str());
+        say("cursor visible");
+    }
+    return 0;
+}
+
 int cmd_stop() {
     kill_all("sfwm");
     kill_all("java");
@@ -301,6 +337,7 @@ int main(int argc, char **argv) {
         say("  key <KEYNAME>                                  inject one key, e.g. F3");
         say("  status                                         processes, panel, perf tail");
         say("  shot [path]                                    screencap");
+        say("  cursor {on|off}                                runtime cursor toggle");
         say("  stop                                           kill sfwm and java");
         return 2;
     }
@@ -312,6 +349,7 @@ int main(int argc, char **argv) {
     if (!strcmp(c, "key")) return cmd_key(rest, args);
     if (!strcmp(c, "status")) return cmd_status();
     if (!strcmp(c, "shot")) return cmd_shot(rest, args);
+    if (!strcmp(c, "cursor")) return cmd_cursor(rest, args);
     if (!strcmp(c, "stop")) return cmd_stop();
     say("unknown command: %s", c);
     return 2;

@@ -236,3 +236,42 @@ refresh:         vsyncRate=165.00
 ```
 
 Then `sfwmctl key F3` and read the top-left of the screen.
+
+---
+
+## 9. Running it as a service (optional)
+
+`android/ksu-service/` installs as a KSU module and exposes `sfwm`, `sfwm-service` and `sfwmctl`
+in `/system/bin`. Disable or remove the module and nothing is left behind.
+
+```sh
+sfwm-service start | stop | restart | status | config
+```
+
+**Where state lives.** Not in `/data/data/com.termux` — PackageManagerService has wiped that
+directory on this device more than once. Not in `/data/adb` either: it is `0700 root`, so the
+Termux uid cannot even traverse it, and paths under it land in `mountinfo`, which is exactly
+what a mount-marker scan looks for. The runtime is `/dev/sfwm`: tmpfs, not a mount point, not
+under `/data`, and unreachable by any app-data cleanup.
+
+Directory mode must be **0777**. `0711` silently prevents the Wayland socket from appearing.
+The socket itself is then `0770`, owned by the Termux uid.
+
+Config in `/data/adb/modules/sfwm-service/config.sh`: scale, fps, async, cursor, cursor theme
+and size, idle exit, log size.
+
+### Cursor
+
+- `SFWM_CURSOR=0` hides it outright, whatever the client asks for.
+- `sfwmctl cursor off|on` flips it live. The compositor polls `<runtime>/cursor-off` every 32
+  frames, because neither the environment nor a socket command can change a running process.
+- Theme and size come from `XCURSOR_THEME`, `XCURSOR_SIZE` and `XCURSOR_PATH`.
+
+---
+
+## 10. One more trap
+
+- **`sh "$RUN/env"` exports into a child shell.** The compositor inherited nothing, so it never
+  saw `XDG_RUNTIME_DIR`, `LD_PRELOAD` or the Mesa variables, and quietly created no Wayland
+  socket where anyone expected it. Use `. "$RUN/env"`. This cost an entire debugging round: every
+  symptom pointed at SELinux and the directory mode, both of which were innocent.
