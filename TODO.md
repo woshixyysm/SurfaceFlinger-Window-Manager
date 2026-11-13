@@ -5,10 +5,15 @@ intentionally grouped by status; this is a working roadmap, not a release schedu
 
 ## Bugs
 
-- [ ] **sfwm layers flicker when Android activities update.** The reported symptom is that
-  layers drawn by sfwm flicker when an Android activity updates underneath them. Reproduce
-  the exact transition and trace SurfaceFlinger layer state, visibility, z-order and transaction
-  timing before choosing a fix. Root cause is not established.
+- [ ] **Intermittent sfwm layer flicker during external Android layer updates.** SFWM-rendered
+  layers may flicker when Android activities or system UI elements update beneath or near
+  them. Observed triggers include the volume UI appearing and interaction with non-transparent
+  Android activities. The affected area can be large. The issue is rare and difficult to
+  reproduce. Common clients such as kitty appear unaffected, and most GTK, Qt and Tk
+  applications have not shown the same behaviour. Android's own composition does not show
+  the issue. Capture SurfaceFlinger layer state, transaction timing, buffer submission and
+  release fences, visibility, z-order and damage regions during reproduction. Compare
+  affected and unaffected clients. Root cause remains unknown.
 - [ ] **Hosted Android window lifecycle.** Verify that activity and virtual-display teardown,
   recreation and relaunch leave no stale overlay windows, slots or layer state.
 
